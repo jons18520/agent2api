@@ -128,7 +128,7 @@ impl Region {
             Self::Cn => "https://codearts.huaweicloud.com",
             // 国际站 CodeArts 控制台（区域化域名，与国内 `codearts.huaweicloud.com`
             // 不是一台）。实测 `/portal/authorize` 返回与国内同形的门户引导页。
-            Self::Intl => "https://devcloud.ap-southeast-3.huaweicloud.com",
+            Self::Intl => "https://codearts.ap-southeast-1.huaweicloud.com",
         }
     }
 
