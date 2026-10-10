@@ -357,7 +357,16 @@ pub async fn discover(endpoints: &CatalogEndpoints<'_>, credential: &Credential)
                     Ok(body) => {
                         log_raw(&format!("agent detail {id}"), &body);
                         match parse_agent_detail(&body, endpoints.language) {
-                            Ok(models) => append_unique(&mut agent_models, models),
+                            Ok(models) => {
+                                // 逐个 agent 记解析数：面板「列出的模型比 agent 少」时，
+                                // 一眼看出是哪些 agent 的 detail 没有 display_enabled 模型
+                                // （trial 账号的 detail 常常 200 但 `gpts.models` 为空）。
+                                crate::server::logging::log(
+                                    "[CodeArts]",
+                                    &format!("  agent {id} 解析出 {} 个可用模型", models.len()),
+                                );
+                                append_unique(&mut agent_models, models)
+                            }
                             Err(reason) => catalog.warnings.push(format!("agent 目录 {id}：{reason}")),
                         }
                     }
@@ -409,7 +418,10 @@ pub async fn discover(endpoints: &CatalogEndpoints<'_>, credential: &Credential)
                 benefit_models = Some(benefit);
             }
             Ok(None) => {}
-            Err(reason) => catalog.warnings.push(format!("福利目录：{reason}")),
+            Err(reason) => {
+                benefit_state = "查询失败（见下方告警）";
+                catalog.warnings.push(format!("福利目录：{reason}"));
+            }
         }
     }
 
@@ -532,6 +544,11 @@ async fn fetch_benefit(
         false,
     )
     .await?;
+    // 开关响应是"到底接没接上福利"的关键判据，而且很小 —— 直接进面板日志
+    // （不只是 verbose）。国际版实测会回 **HTTP 200 但形状不是 `{enabled:...}`**
+    // （`fetch_signed` 只在 200 时交 body，所以能走到这里就说明状态码是 200），
+    // 只看告警「没有 enabled 字段」不知道上游回了什么，必须看原文。
+    log_gate(&gate);
     if !parse_benefit_gate(&gate)? {
         return Ok(None);
     }
@@ -545,7 +562,22 @@ async fn fetch_benefit(
         true,
     )
     .await?;
+    log_raw("福利网关 gateway/config", &body);
     parse_benefit(&body).map(Some)
+}
+
+/// 福利开关响应落**面板日志**（小响应全文；超长只记长度，原文仍走 verbose）。
+///
+/// 与 [`log_raw`] 的区别在级别：开关响应是判据本身，必须默认可见；agent/builtin
+/// 的原文只是佐证，留在 verbose 里免得每次刷新都把日志撑大。
+fn log_gate(body: &str) {
+    const MAX: usize = 2000;
+    if body.len() <= MAX {
+        crate::server::logging::log("[CodeArts]", &format!("  福利开关响应：{body}"));
+    } else {
+        crate::server::logging::log("[CodeArts]", &format!("  福利开关响应：{} 字节（过长，原文见调试日志）", body.len()));
+        log_raw("福利开关", body);
+    }
 }
 
 /// 一次签名 GET（目录类请求都是 GET + 空体）。
