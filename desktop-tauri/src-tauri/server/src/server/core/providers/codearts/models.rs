@@ -566,18 +566,43 @@ async fn fetch_benefit(
     parse_benefit(&body).map(Some)
 }
 
-/// 福利开关响应落**面板日志**（小响应全文；超长只记长度，原文仍走 verbose）。
+/// 福利开关响应落**面板日志**。
+///
+/// 分两行：先一行**形状摘要**（顶层键 + 类型 + 长度/子键），再一行**全文**。
+/// 国际版实测这个端点回 **6.5KB 的 JSON 且顶层没有 `enabled`** —— 既不是国内那种
+/// `{enabled:...}` 小开关，也不像错误信封（错误信封一般几百字节），所以先把形状
+/// 看清楚：是「错误码信封」还是「直接给了模型列表」还是「另一套嵌套结构」。
 ///
 /// 与 [`log_raw`] 的区别在级别：开关响应是判据本身，必须默认可见；agent/builtin
 /// 的原文只是佐证，留在 verbose 里免得每次刷新都把日志撑大。
 fn log_gate(body: &str) {
-    const MAX: usize = 2000;
+    crate::server::logging::log("[CodeArts]", &format!("  福利开关响应形状：{}", describe_shape(body)));
+    const MAX: usize = 10_000;
     if body.len() <= MAX {
-        crate::server::logging::log("[CodeArts]", &format!("  福利开关响应：{body}"));
+        crate::server::logging::log("[CodeArts]", &format!("  福利开关响应全文：{body}"));
     } else {
-        crate::server::logging::log("[CodeArts]", &format!("  福利开关响应：{} 字节（过长，原文见调试日志）", body.len()));
+        crate::server::logging::log("[CodeArts]", &format!("  福利开关响应：{} 字节（超过 {MAX}，原文见调试日志）", body.len()));
         log_raw("福利开关", body);
     }
+}
+
+/// 顶层结构摘要：每个键的类型，对象/数组再带上子键或长度。
+///
+/// 排障要的是"这是什么形状"，不是 6KB 原文逐字读一遍 —— 一行摘要通常就够定位
+/// 是「`error_code` 信封」还是「`result.models` 列表」。
+fn describe_shape(body: &str) -> String {
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(body) else {
+        return "非对象 JSON".to_string();
+    };
+    map.iter()
+        .map(|(key, value)| match value {
+            Value::Object(inner) => format!("{key}:object(keys={})", inner.keys().cloned().collect::<Vec<_>>().join(",")),
+            Value::Array(items) => format!("{key}:array[{}]", items.len()),
+            Value::String(text) => format!("{key}:string({} 字节)", text.len()),
+            other => format!("{key}:{other}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// 一次签名 GET（目录类请求都是 GET + 空体）。
