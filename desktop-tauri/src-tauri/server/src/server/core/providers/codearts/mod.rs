@@ -735,7 +735,8 @@ impl ProviderAdapter for CodeArtsAdapter {
                 Ok(credential) => credential,
                 Err(error) => return super::adapter::ModelRefreshOutcome::failed(error.message),
             };
-            // 区域端点：国际版没有福利网关（`None`），`discover` 会自动跳过那个源
+            // 区域端点：福利网关两地共用同一台（见 `region` 的模块头）；是否启用
+            // 由区域上的 `/v1/benefit-gateway-config` 决定，`discover` 自己去查
             let base_url = self.region.base_url();
             let benefit_gateway_url = self.region.benefit_gateway_url();
             let endpoints = models::CatalogEndpoints {

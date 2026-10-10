@@ -672,8 +672,8 @@ pub async fn refresh_usage(store: &AccountStore, account_id: &str, now_ms: i64) 
     let Ok(credential) = current_credential(store, account_id).await else {
         return Value::Null;
     };
-    // 区域由账号记录回答：国际版没有福利网关（`None` → 空串，`fetch_both` 会
-    // 跳过那一侧，与 `query_usage` 同一口径）。
+    // 区域由账号记录回答：福利网关按区域取（两地默认同一台，见 `region` 的模块头）；
+    // 空串表示该源被关闭，`fetch_both` 会跳过那一侧，与 `query_usage` 同一口径。
     let Some(region) = store.codearts_region_of(account_id) else {
         return Value::Null;
     };

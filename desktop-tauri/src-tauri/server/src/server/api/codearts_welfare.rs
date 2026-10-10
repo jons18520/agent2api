@@ -26,8 +26,9 @@ use crate::server::ServerState;
 /// POST 那条分派上（ZCode 的 `zcode-claim/preview` 同一形状）。
 /// 上游那一侧确实只有一次 `GET /v1/ops/delivery`。
 pub async fn preview(state: &ServerState, account_id: &str) -> Response {
-    // 区域由记录自己回答（两个区域共用这两个端点），福利接口挂在**该区域的**
-    // 区域网关上（国际版没有福利网关，但活动接口仍在区域 API 上）。
+    // 区域由记录自己回答（两个区域共用这两个端点），ops 活动接口挂在**该区域的**
+    // 区域 API 上 —— 与福利模型网关（两地共用的另一台，见 `region` 的模块头）是
+    // 两回事。
     let Some(region) = state.store().codearts_region_of(account_id) else {
         return management_error(404, "未找到 CodeArts 账号");
     };

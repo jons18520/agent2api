@@ -33,12 +33,15 @@
 //! 该 API **只在 `cn-north-4` 与 `cn-south-1` 上线**，国际区域一律 1007 —— 与
 //! `product.json` 里 `iamStsOpenDomain` 不分区完全吻合。
 //!
-//! ── 福利网关国际版没有 ──────────────────────────────────────
-//! 国内版的「福利网关」（`opengw.developer.huaweicloud.com`）是**中国站**
-//! 的运营活动后端（`developer.huaweicloud.com` 是中国站开发者域名）。国际站
-//! 没有对应的运营活动，因此国际版**不给福利网关**（`benefit_gateway_url` 为
-//! `None`）—— 目录发现会自动跳过这个源，`/v1/benefit-gateway-config` 那个
-//! 总开关在国内版才存在。这不是"少接了一块"，而是上游就没有。
+//! ── 福利网关两地共用（原判据已被推翻）──────────────────────
+//! 官方扩展的福利后端（bundle 里的 `sue()`）对国内 / 国际返回**同一组中国主机**
+//! （`opengw.developer.huaweicloud.com`；灰度走 `snapengine-apig.cn-north-7`），
+//! 只用 `isGammaVersion` 区分，**没有任何按地区的分支**。是否启用由区域上的
+//! `/v1/benefit-gateway-config` 决定 —— 实测该端点在国内 `cn-north-4` 与国际
+//! `ap-southeast-1` 上都存在（均回 `APIG.0301` 需鉴权），`/v1/ops/*` 每日福利同理。
+//! 早先"国际站没有运营活动后端、故不给福利网关"的推断是从主机域名
+//! （`developer.huaweicloud.com` 是中国站域名）推出来的，与扩展实证不符，
+//! 已按**两地共用**处理。
 //!
 //! ── 为什么是两个 provider 而不是「一家的一个字段」──────────
 //! 与 Cline 的两个额度池、AutoClaw / Accio / ZCode 的两个地区同一思路：做成
@@ -144,11 +147,17 @@ impl Region {
         }
     }
 
-    /// 本区域福利网关的**默认**基址（`None` = 该区域没有福利网关，见模块头）。
+    /// 本区域福利网关的**默认**基址。
+    ///
+    /// **两地同一台** `opengw.developer.huaweicloud.com`：官方扩展的福利后端
+    /// （`sue()`）对国内 / 国际是同一组中国主机，只用灰度标志 `isGammaVersion`
+    /// 在 `opengw`（生产）与 `snapengine-apig.cn-north-7`（灰度）之间选，**没有按
+    /// 地区的分支**；是否启用由区域上的 `/v1/benefit-gateway-config` 决定
+    /// （国际区域实测也有这个端点）。所以国际版也接福利源（见模块头）。
     pub const fn default_benefit_gateway_url(self) -> Option<&'static str> {
         match self {
             Self::Cn => Some("https://opengw.developer.huaweicloud.com"),
-            Self::Intl => None,
+            Self::Intl => Some("https://opengw.developer.huaweicloud.com"),
         }
     }
 
@@ -214,9 +223,9 @@ impl Region {
 
     /// 福利网关基址（`{PREFIX}BENEFIT_GATEWAY_URL` 可覆盖；`None` = 该区域没有）。
     ///
-    /// 国际版默认就是 `None`（没有运营活动后端，见模块头）；国内版可以用这个环境
-    /// 变量指到另一个（预发 / 自建代理）地址。注意空串按「未设置」处理 ——
-    /// 想关掉国内版的这个源，把 `benefit_gateway_url` 传空串给 `models::discover`
+    /// 两地默认都是 `opengw.developer.huaweicloud.com`（福利后端不分区，见模块头）；
+    /// 环境变量可以把它指到另一个（预发 / 自建代理）地址。注意空串按「未设置」处理
+    /// —— 想关掉这个源，把 `benefit_gateway_url` 传空串给 `models::discover`
     /// 即可（它按 `filter(|url| !url.trim().is_empty())` 跳过）。
     pub fn benefit_gateway_url(self) -> Option<String> {
         if let Some(value) = self.env_override("BENEFIT_GATEWAY_URL") {
@@ -282,10 +291,17 @@ mod tests {
     }
 
     #[test]
-    fn only_the_domestic_region_has_a_benefit_gateway() {
-        assert!(Region::Cn.default_benefit_gateway_url().is_some());
-        // 国际站没有运营活动后端（见模块头）—— 不能给一个编出来的地址
-        assert_eq!(None, Region::Intl.default_benefit_gateway_url());
+    fn both_regions_share_the_benefit_gateway() {
+        // 福利后端**不分区**：官方扩展对国内 / 国际用同一组中国主机（见模块头）。
+        // 早先"国际版没有福利网关"的推断已被推翻。
+        assert_eq!(
+            Some("https://opengw.developer.huaweicloud.com"),
+            Region::Cn.default_benefit_gateway_url()
+        );
+        assert_eq!(
+            Region::Cn.default_benefit_gateway_url(),
+            Region::Intl.default_benefit_gateway_url()
+        );
     }
 
     #[test]
