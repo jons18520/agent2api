@@ -33,24 +33,22 @@
 //! 该 API **只在 `cn-north-4` 与 `cn-south-1` 上线**，国际区域一律 1007 —— 与
 //! `product.json` 里 `iamStsOpenDomain` 不分区完全吻合。
 //!
-//! ── 福利网关：目录两地共用，但**国际版的福利模型要打中国网关**──
+//! ── 福利网关只有国内版能真正调用（国际版目录拿得到、模型两条路都调不通）──
 //! 官方扩展的福利后端（bundle 里的 `sue()`）对国内 / 国际返回同一组中国主机
 //! （`opengw.developer.huaweicloud.com`；灰度走 `snapengine-apig.cn-north-7`），
 //! 只用 `isGammaVersion` 区分 —— **目录**（`/api/v1/gateway/config`）两地都能取到，
 //! 同样的 4 个福利模型（`glm-5.3-flash` / `deepseek-v4-*`）。
 //!
-//! 但**目录可调 ≠ 模型可调**（2026-10 实测）：
-//!   * 国际区域上的 `/v1/benefit-gateway-config` 回的不是国内那种 `{"enabled":...}`
-//!     开关，而是 **`{"vendors":[...]}`**（第三方模型目录）；
-//!   * 照"拿到配置即启用"继续取目录能拿到 4 个福利模型，但**这些模型注册在
-//!     中国的 InferHub**：拿国际数据面 `snap-access.ap-southeast-1` 调它们一律
-//!     `InferHub.002002009.404 The model is not registered`。
+//! 但**目录可调 ≠ 模型可调**（2026-10 实测，两条路都不通）：
+//!   * 走国际数据面 `snap-access.ap-southeast-1`：`InferHub.002002009.404
+//!     The model is not registered`（模型注册在中国的 InferHub，新加坡这套不认识）；
+//!   * 改打中国区域网关 `snap-access.cn-north-4`（依据是国际凭据本就由 cn-north-4
+//!     的 STS 签发，签名确实被接受）：`403 TM.00001005 Access denied. To continue
+//!     using this function, purchase a package`（账号在中国侧没有 CodeArts 套餐授权）。
 //!
-//! 所以国际版的福利模型**单独改打中国的区域网关**（`snap-access.cn-north-4`）——
-//! 依据是国际账号的凭据本就是 cn-north-4 的 STS 签发的，同一套签名大概率被中国
-//! 网关接受。路由在 [`Region::benefit_chat_base`]，**这是一条实测中的路由**：
-//! 若中国网关拒了国际凭据，就把国际版福利源整体关掉（`default_benefit_gateway_url`
-//! 回 `None`），别留一调就 404 的幽灵模型。
+//! 两条路都不可用，所以国际版 `benefit_gateway_url` 给 `None`（整个福利源跳过），
+//! 只列 agent/builtin 真正可调的模型。国内版不受影响。
+//! （早先"两地共用福利网关"只验证到"端点存在"，没验证"模型可调"。）
 //!
 //! ── 为什么是两个 provider 而不是「一家的一个字段」──────────
 //! 与 Cline 的两个额度池、AutoClaw / Accio / ZCode 的两个地区同一思路：做成
@@ -156,19 +154,18 @@ impl Region {
         }
     }
 
-    /// 本区域福利网关的**默认**基址（福利**目录**源；`None` = 该区域没有福利源）。
+    /// 本区域福利网关的**默认**基址（福利**目录**源；`None` = 该区域没有可调用的福利模型）。
     ///
-    /// **两地同一台** `opengw.developer.huaweicloud.com`：官方扩展的福利后端
-    /// （`sue()`）对国内 / 国际是同一组中国主机，只用灰度标志 `isGammaVersion`
-    /// 在 `opengw`（生产）与 `snapengine-apig.cn-north-7`（灰度）之间选，**没有按
-    /// 地区的分支**。两地的福利**目录**都能取到同样的 4 个模型。
+    /// 国内版：`opengw.developer.huaweicloud.com` —— 福利模型注册在 cn-north-4 的
+    /// InferHub，可正常调用。
     ///
-    /// 注意**目录可调 ≠ 模型可调**：国际版的福利模型注册在中国，推理要另走
-    /// [`Self::benefit_chat_base`]（见模块头）。
+    /// 国际版：**`None`**。目录两地共用、国际版也能取到同样的 4 个模型，但那些模型
+    /// 国际数据面调是 `404 not registered`、改打中国网关又是 `403 需购买套餐`
+    /// （见模块头）。挂上只会广告出不可用的模型。
     pub const fn default_benefit_gateway_url(self) -> Option<&'static str> {
         match self {
             Self::Cn => Some("https://opengw.developer.huaweicloud.com"),
-            Self::Intl => Some("https://opengw.developer.huaweicloud.com"),
+            Self::Intl => None,
         }
     }
 
@@ -245,28 +242,6 @@ impl Region {
         self.default_benefit_gateway_url().map(str::to_string)
     }
 
-    /// 福利模型的**推理**基址（不含尾斜杠；`{PREFIX}BENEFIT_CHAT_BASE` 可覆盖）。
-    ///
-    /// 福利模型（`glm-5.3-flash` / `deepseek-v4-*`）的**目录**来自 opengw，但**模型
-    /// 注册在中国的 InferHub**：国内版打本区域网关即可（福利模型本就在 cn-north-4）；
-    /// 国际版的数据面在 `ap-southeast-1`，调福利模型会 `InferHub.002002009.404`，
-    /// 所以要单独打到中国的区域网关 —— 依据是国际账号的凭据本就是 cn-north-4 的
-    /// STS 签发的（见模块头）。
-    ///
-    /// **这是实测中的路由**：若中国网关拒了国际凭据（401/403），就把国际版福利源
-    /// 整体关掉（`default_benefit_gateway_url` 回 `None`），别留幽灵模型。
-    pub fn benefit_chat_base(self) -> String {
-        if let Some(value) = self.env_override("BENEFIT_CHAT_BASE") {
-            return value;
-        }
-        match self {
-            // 国内版：福利模型本就在 cn-north-4，跟本区域网关走（`CODEARTS_BASE_URL`
-            // 这类私有化覆盖也要一并生效，所以取 `base_url()` 而不是常量）。
-            Self::Cn => self.base_url(),
-            Self::Intl => "https://snap-access.cn-north-4.myhuaweicloud.com".to_string(),
-        }
-    }
-
     /// 本区域账号记录 id 的**前缀**（id 生成用）。
     ///
     /// 国内版沿用既有的 `codearts-`（存量账号的 id 就是它，不能改）；国际版用
@@ -324,29 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn both_regions_share_the_benefit_gateway() {
-        // 福利**目录**不分区：官方扩展对国内 / 国际用同一组中国主机（见模块头）。
+    fn only_the_domestic_region_has_callable_benefit_models() {
+        // 国内版：福利模型注册在 cn-north-4 的 InferHub，可调。
         assert_eq!(
             Some("https://opengw.developer.huaweicloud.com"),
             Region::Cn.default_benefit_gateway_url()
         );
-        assert_eq!(
-            Region::Cn.default_benefit_gateway_url(),
-            Region::Intl.default_benefit_gateway_url()
-        );
-    }
-
-    #[test]
-    fn intl_benefit_models_are_routed_to_the_china_gateway() {
-        // 福利模型注册在中国的 InferHub：国内版本就在中国，国际版要单独打过去。
-        assert_eq!(Region::Cn.default_base_url(), Region::Cn.benefit_chat_base());
-        assert_eq!(
-            "https://snap-access.cn-north-4.myhuaweicloud.com",
-            Region::Intl.benefit_chat_base()
-        );
-        // 普通模型的推理基址仍是本区域（国际版 = ap-southeast-1），不受影响。
-        assert!(Region::Intl.base_url().contains("ap-southeast-1"));
-        assert_ne!(Region::Intl.base_url(), Region::Intl.benefit_chat_base());
+        // 国际版：目录拿得到，但国际数据面调是 404 not registered、改打中国网关又是
+        // 403 需购买套餐（见模块头）—— 两条路都不通，故不给福利源。
+        assert_eq!(None, Region::Intl.default_benefit_gateway_url());
     }
 
     #[test]

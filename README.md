@@ -17,7 +17,7 @@
 | Cline（Free / Pass） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | — | — |
 | Accio（国际版 / 国内版） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ 用量百分比 | — | — |
 | ZCode（国内版 / 国际版） | ✓ | ✗ | ✗ 静态表 | ✓ 套餐余额 | — | ✓ 限时套餐（手动） |
-| CodeArts（国内版 / 国际版） | ✓ | ✓ 一次性轮换 | ✓ 远程（三源合并） | ✓ 两份账 | — | ✓ 每日福利（手动） |
+| CodeArts（国内版 / 国际版） | ✓ | ✓ 一次性轮换 | ✓ 远程（国内三源 / 国际两源） | ✓ 两份账 | — | ✓ 每日福利（手动） |
 | Trae | ✓ | ✓ 一次一换 | ✓ 仅远程 | ✓ 两份账 | — | — |
 | Loomy（讯飞） | ✓ | ✗ 无续期接口 | ✓ 仅远程 | ✓ 两份积分账 | ✓ 每日赠送积分刷新 | — |
 | 自定义提供商 | ✓ Chat 透传 / Responses / Anthropic | — | ✓ 手动登记 + 服务端拉取 | — | — | — |
@@ -217,7 +217,7 @@ agent2api/
 │  │  │  │  │  │                oauth（PKCE 网页登录 + loopback 回调）/ refresh（单飞续期）/
 │  │  │  │  │  │                session（chat-session 心跳与每账号并发准入）/ chat（会话式转发）/
 │  │  │  │  │  │                stream_fault（HTTP 200 的流内错误信封）/ redact（错误体脱敏）/
-│  │  │  │  │  │                models（agent / builtin / 福利网关三源合并）/
+│  │  │  │  │  │                models（agent / builtin / 福利网关三源合并；国际版无福利源）/
 │  │  │  │  │  │                balance（订阅统计 + 福利网关两份账）/
 │  │  │  │  │  │                welfare（每日福利领取：幂等键先落盘、回读二次确认）
 │  │  │  │  │  ├─ trae/         Trae（字节 AI IDE SOLO 通道）：credentials / device（设备密钥对）/
