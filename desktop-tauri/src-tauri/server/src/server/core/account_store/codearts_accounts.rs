@@ -18,7 +18,6 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::server::core::providers::codearts::credentials::Credential;
-use crate::server::core::providers::codearts::region::Region;
 use crate::server::core::providers::{kind_id, ProviderKind};
 use crate::server::logging;
 
@@ -29,72 +28,44 @@ use super::store::{AccountStore, AccountStoreError};
 use super::store_util::{max_concurrent_public, token_tail_of, truncate_chars};
 use super::CredentialWrite;
 
-/// 本家**国内版**的 provider id（`store_view` 的形状分派与别处比对都要用，
-/// 与其它几家同一命名：`<X>_PROVIDER_ID`）。国际版见 [`CODEARTS_INTL_PROVIDER_ID`]。
+/// 本家的 provider id（`store_view` 的形状分派与别处比对都要用，
+/// 与其它几家同一命名：`<X>_PROVIDER_ID`）。
 pub const CODEARTS_PROVIDER_ID: &str = kind_id(ProviderKind::CodeArts);
-/// CodeArts **国际版**的 provider id（`codearts-intl`）。
-pub const CODEARTS_INTL_PROVIDER_ID: &str = kind_id(ProviderKind::CodeArtsIntl);
+
+const PROVIDER: &str = CODEARTS_PROVIDER_ID;
 
 /// 刷新前用来比对「还是不是同一份凭证」的键（变了说明期间被重新添加/导入过）。
 const IDENTITY_KEYS: &[&str] = &["accessToken", "refreshToken", "userId", "access_key_id", "refresh_token"];
 
 impl AccountStore {
-    /// 取一条 codearts 账号记录（**按区域**）；`account_id` 为空时取该区域
-    /// 「启用且能用」的第一条。
-    ///
-    /// 区域是必需的而不是可选的：国内版 / 国际版是两个 provider、两套账号
-    /// （STS 签发地不同，凭据不通用），按区域取才不会把国际版账号的凭据拿去打
-    /// 国内网关（见 `codearts::region` 的模块头）。
-    pub fn codearts_account_record(&self, region: Region, account_id: &str) -> Option<Value> {
+    /// 取一条 codearts 账号记录；`account_id` 为空时取「启用且能用」的第一条。
+    pub fn codearts_account_record(&self, account_id: &str) -> Option<Value> {
         let guard = self.guard();
-        let provider = region.provider_id();
         if !account_id.is_empty() {
             let record = self.record_by_id(&guard, account_id)?;
-            return (record.provider() == provider).then(|| record.to_value());
+            return (record.provider() == PROVIDER).then(|| record.to_value());
         }
-        self.records_for_provider(&guard, provider)
+        self.records_for_provider(&guard, PROVIDER)
             .into_iter()
             .filter(|record| record.enabled() && record.has_token())
             .min_by_key(|record| record.order_key())
             .map(|record| record.to_value())
     }
 
-    /// 取一条 codearts 账号记录（**不分区域**，按 id 找）—— 给「手上只有
-    /// account_id」的管理动作（福利预览 / 领取 / 余额回读）用。不是 codearts
-    /// 系或不存在时 None。
-    pub fn codearts_account_record_any(&self, account_id: &str) -> Option<Value> {
-        if account_id.is_empty() {
-            return None;
-        }
-        let guard = self.guard();
-        self.record_by_id(&guard, account_id)
-            .filter(|record| super::is_codearts_family(&record.provider()))
-            .map(|record| record.to_value())
-    }
-
-    /// account_id 属于哪个区域（不是 codearts 系 / 不存在 → None）。
-    pub fn codearts_region_of(&self, account_id: &str) -> Option<Region> {
-        let guard = self.guard();
-        let record = self.record_by_id(&guard, account_id)?;
-        Region::from_provider_id(&record.provider())
-    }
-
     /// 添加/更新一条 codearts 账号（粘贴凭证与网页登录共用这个入口）。
     pub fn add_codearts_account(
         &self,
-        region: Region,
         credential: &Credential,
         name: Option<&str>,
         source: &str,
     ) -> Result<Value, AccountStoreError> {
-        let provider = region.provider_id();
         if !credential.valid() {
             return Err(AccountStoreError::bad_request("CodeArts 凭据缺少 access_key_id 或 secret_access_key"));
         }
         let guard = self.guard();
         // 身份命中既有记录就地更新（重复登录不该在列表里堆两条）
         let existing = self
-            .records_for_provider(&guard, provider)
+            .records_for_provider(&guard, PROVIDER)
             .into_iter()
             .find(|record| same_identity(record, credential));
         if credential.user_id.trim().is_empty() && credential.domain_id.trim().is_empty() {
@@ -107,9 +78,7 @@ impl AccountStore {
             } else {
                 credential.user_id.clone()
             };
-            // 区域前缀：国际版与国内版同一个人可能有相同的 userId，前缀让两地的
-            // id 天然不相交（见 `Region::account_id_prefix`）
-            format!("{}{:x}", region.account_id_prefix(), Sha256::digest(seed.as_bytes()))
+            format!("codearts-{:x}", Sha256::digest(seed.as_bytes()))
         });
         if existing.is_none() && self.record_by_id(&guard, &id).is_some() {
             return Err(AccountStoreError::new("CodeArts 账号 ID 已被其它账号占用，请先核对账号记录", 409));
@@ -141,7 +110,7 @@ impl AccountStore {
             }
         };
         fields.insert("id".to_string(), Value::String(id.clone()));
-        fields.insert("provider".to_string(), Value::String(provider.to_string()));
+        fields.insert("provider".to_string(), Value::String(PROVIDER.to_string()));
         fields.insert("name".to_string(), Value::String(truncate_chars(&record_name, 100)));
         mark_name_custom(&mut fields, name.is_some_and(|value| !value.trim().is_empty()), existing.as_ref());
         fields.insert("tokenTail".to_string(), Value::String(token_tail_of(&credential.access_key_id)));
@@ -171,7 +140,7 @@ impl AccountStore {
         let guard = self.guard();
         let Some(mut record) = self
             .record_by_id(&guard, id)
-            .filter(|record| super::is_codearts_family(&record.provider()))
+            .filter(|record| record.provider() == PROVIDER)
         else {
             return Ok(CredentialWrite::Stale);
         };
@@ -219,7 +188,7 @@ impl AccountStore {
         let guard = self.guard();
         let Some(mut record) = self
             .record_by_id(&guard, account_id)
-            .filter(|record| super::is_codearts_family(&record.provider()))
+            .filter(|record| record.provider() == PROVIDER)
         else {
             return Err(AccountStoreError::new("CodeArts 账号已不存在，领取台账无处落盘", 404));
         };
@@ -232,7 +201,7 @@ impl AccountStore {
     /// 台账的读侧（`codearts_account_record` 已经把整个 data 交回来了，
     /// 这里只是给「没有台账」一个统一的缺省形状，省得每处都 `unwrap_or_default`）。
     pub fn codearts_welfare_ledger(&self, account_id: &str) -> Option<Value> {
-        self.codearts_account_record_any(account_id)
+        self.codearts_account_record(account_id)
             .and_then(|record| record.get("codeartsWelfare").cloned())
     }
 
@@ -247,18 +216,8 @@ impl AccountStore {
         for key in ["id", "provider", "name", "userId", "source", "tokenTail", "expiresAt"] {
             public.insert(key.to_string(), record.get(key).cloned().unwrap_or(Value::Null));
         }
-        // 区域（国内版 / 国际版）：公开形态把它标出来供界面显示。判据是记录自己的
-        // provider id —— 两个区域共用一个公开形态函数（`store_view` 按
-        // `is_codearts_family` 分派到这里）。
-        let region = Region::from_provider_id(&record.provider());
-        public.insert(
-            "edition".to_string(),
-            region.map(|value| Value::String(value.edition().to_string())).unwrap_or(Value::Null),
-        );
-        public.insert(
-            "editionLabel".to_string(),
-            region.map(|value| Value::String(value.label().to_string())).unwrap_or(Value::Null),
-        );
+        public.insert("edition".to_string(), Value::Null);
+        public.insert("editionLabel".to_string(), Value::Null);
         public.insert("hasRefreshToken".to_string(), Value::Bool(can_refresh));
         public.insert("priority".to_string(), Value::from(record.priority()));
         public.insert("enabled".to_string(), Value::Bool(record.enabled()));
@@ -361,8 +320,8 @@ mod tests {
     #[test]
     fn write_back_lands_and_keeps_both_key_spellings() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_OLD", "u1"), None, "manual").expect("添加应当成功");
-        let record = store.codearts_account_record(Region::Cn, "").expect("刚添加的账号要能读回来");
+        store.add_codearts_account(&credential("AK_OLD", "u1"), None, "manual").expect("添加应当成功");
+        let record = store.codearts_account_record("").expect("刚添加的账号要能读回来");
         // 通用键与专有键都得是旧值（选路判 has_token 读的是 accessToken）
         assert_eq!(record["accessToken"], Value::String("AK_OLD".into()));
 
@@ -371,7 +330,7 @@ mod tests {
             .expect("写回本身不该报错");
         assert_eq!(CredentialWrite::Written, write, "记录没被动过，应当判定为可写");
 
-        let after = store.codearts_account_record(Region::Cn, "").unwrap();
+        let after = store.codearts_account_record("").unwrap();
         assert_eq!(after["access_key_id"], Value::String("AK_NEW".into()));
         assert_eq!(after["accessToken"], Value::String("AK_NEW".into()), "通用键漏更新的话账号会被当成没有 token");
         assert_eq!(after["refreshToken"], Value::String("rt-of-AK_NEW".into()), "一次性令牌必须跟着换");
@@ -384,25 +343,25 @@ mod tests {
     #[test]
     fn write_back_refuses_when_the_record_changed_underneath() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_OLD", "u1"), None, "manual").unwrap();
-        let snapshot = store.codearts_account_record(Region::Cn, "").expect("读一份快照");
+        store.add_codearts_account(&credential("AK_OLD", "u1"), None, "manual").unwrap();
+        let snapshot = store.codearts_account_record("").expect("读一份快照");
         // 期间用户重新粘贴了凭据（同一身份、不同令牌）—— 单飞里那次换证已经作废，
         // 不能再把内存里的结果盖到盘上
-        store.add_codearts_account(Region::Cn, &credential("AK_REIMPORTED", "u1"), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_REIMPORTED", "u1"), None, "manual").unwrap();
 
         let write = store.update_codearts_credentials_if_current(&snapshot, &credential("AK_FROM_FLIGHT", "u1")).unwrap();
         assert_eq!(CredentialWrite::Stale, write, "身份键变了必须判 Stale");
-        let stored = store.codearts_account_record(Region::Cn, "").unwrap();
+        let stored = store.codearts_account_record("").unwrap();
         assert_eq!(stored["access_key_id"], Value::String("AK_REIMPORTED".into()), "Stale 分支绝不能落盘");
     }
 
     #[test]
     fn relogin_updates_in_place_instead_of_stacking_accounts() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_OLD", "u1"), None, "manual").unwrap();
-        store.add_codearts_account(Region::Cn, &credential("AK_NEW", "u1"), Some("改名了"), "manual").unwrap();
+        store.add_codearts_account(&credential("AK_OLD", "u1"), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_NEW", "u1"), Some("改名了"), "manual").unwrap();
         let all = store.list_accounts()["accounts"].as_array().cloned().unwrap_or_default();
-        let mine: Vec<_> = all.iter().filter(|a| a["provider"] == Value::String(CODEARTS_PROVIDER_ID.into())).collect();
+        let mine: Vec<_> = all.iter().filter(|a| a["provider"] == Value::String(PROVIDER.into())).collect();
         assert_eq!(1, mine.len(), "同一 domain+user 重复登录应当就地更新，而不是堆成两条");
         assert_eq!("改名了", mine[0]["name"].as_str().unwrap(), "名字要能改，但账号还是那条");
     }
@@ -410,7 +369,7 @@ mod tests {
     #[test]
     fn partial_paste_does_not_wipe_the_refresh_chain() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_OLD", "u1"), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_OLD", "u1"), None, "manual").unwrap();
         // 用户只粘了短期三件套（没有 refresh token / oauth_context），身份还是那条
         let thin = Credential {
             access_key_id: "AK_THIN".to_string(),
@@ -420,12 +379,12 @@ mod tests {
             user_id: "u1".to_string(),
             ..Default::default()
         };
-        store.add_codearts_account(Region::Cn, &thin, None, "manual").expect("同身份就地更新");
-        let after = store.codearts_account_record(Region::Cn, "").unwrap();
+        store.add_codearts_account(&thin, None, "manual").expect("同身份就地更新");
+        let after = store.codearts_account_record("").unwrap();
         assert_eq!("AK_THIN", after["access_key_id"].as_str().unwrap());
         assert_eq!(
             1,
-            store.list_accounts()["accounts"].as_array().cloned().unwrap_or_default().iter().filter(|a| a["provider"] == Value::String(CODEARTS_PROVIDER_ID.into())).count(),
+            store.list_accounts()["accounts"].as_array().cloned().unwrap_or_default().iter().filter(|a| a["provider"] == Value::String(PROVIDER.into())).count(),
             "带着身份重新粘贴不该另起一条"
         );
         // 长期那一半得留着：洗成空等于判了这个账号死刑（再也续不回来）
@@ -436,12 +395,12 @@ mod tests {
     #[test]
     fn public_shape_carries_no_credential_material() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_SECRETISH", "u1"), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_SECRETISH", "u1"), None, "manual").unwrap();
         // 走真实出口：`list_accounts` 的分派就是 `to_codearts_public_account`
         let accounts = store.list_accounts()["accounts"].as_array().cloned().unwrap_or_default();
         let public = accounts
             .iter()
-            .find(|account| account["provider"] == Value::String(CODEARTS_PROVIDER_ID.into()))
+            .find(|account| account["provider"] == Value::String(PROVIDER.into()))
             .expect("列表里应当有这条 codearts 账号");
         let text = serde_json::to_string(public).unwrap();
         for forbidden in [
@@ -471,8 +430,8 @@ mod tests {
     #[test]
     fn an_unconfigured_concurrency_limit_publishes_the_upstream_cap() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_LIMIT", "u1"), None, "manual").unwrap();
-        let id = store.codearts_account_record(Region::Cn, "").unwrap()["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(&credential("AK_LIMIT", "u1"), None, "manual").unwrap();
+        let id = store.codearts_account_record("").unwrap()["id"].as_str().unwrap().to_string();
         let published = |store: &AccountStore| {
             store.list_accounts()["accounts"]
                 .as_array()
@@ -487,38 +446,6 @@ mod tests {
         assert_eq!(Some(5), published(&store), "配了就按配的数");
         store.update_account(&id, &json!({ "maxConcurrent": 0 })).unwrap();
         assert_eq!(Some(3), published(&store), "0 在本家不是「不限」，回到默认值");
-    }
-
-    /// 两个区域（国内版 / 国际版）的账号**互不干扰**：同一个 domain+user 在两个
-    /// 区域各占一条记录（provider 不同、id 前缀不同），按区域取记录只拿自己那条。
-    /// 这是「区域是两个 provider」这条建模在存储层的落点 —— 混在一起会让转发拿
-    /// 国际版账号的凭据去打国内网关（区域签发，必然 401）。
-    #[test]
-    fn the_two_regions_keep_separate_account_sets() {
-        let store = store();
-        // 同一身份、同一 AK：只差区域 —— 若按身份跨区域去重，第二条会把第一条吞掉
-        store.add_codearts_account(Region::Cn, &credential("AK_SHARED", "u1"), None, "manual").unwrap();
-        store.add_codearts_account(Region::Intl, &credential("AK_SHARED", "u1"), None, "manual").unwrap();
-
-        let all = store.list_accounts()["accounts"].as_array().cloned().unwrap_or_default();
-        let cn = all.iter().find(|a| a["provider"] == Value::String(CODEARTS_PROVIDER_ID.into())).expect("国内版一条");
-        let intl = all.iter().find(|a| a["provider"] == Value::String(CODEARTS_INTL_PROVIDER_ID.into())).expect("国际版一条");
-        assert_ne!(cn["id"], intl["id"], "两地的记录 id 必须不同（前缀不同）");
-
-        let cn_id = cn["id"].as_str().unwrap().to_string();
-        let intl_id = intl["id"].as_str().unwrap().to_string();
-        assert_eq!(Some(Region::Cn), store.codearts_region_of(&cn_id));
-        assert_eq!(Some(Region::Intl), store.codearts_region_of(&intl_id));
-
-        // 按区域取「第一条可用」只拿自己那条
-        let first_id = |region| store.codearts_account_record(region, "").map(|r| r["id"].as_str().unwrap().to_string());
-        assert_eq!(Some(cn_id.clone()), first_id(Region::Cn));
-        assert_eq!(Some(intl_id.clone()), first_id(Region::Intl));
-        // 跨区域按 id 取不到（区域是记录身份的一部分）
-        assert!(store.codearts_account_record(Region::Intl, &cn_id).is_none());
-        // 公开形态带出区域标记，供界面显示
-        assert_eq!(Some("cn"), cn["edition"].as_str());
-        assert_eq!(Some("intl"), intl["edition"].as_str());
     }
 }
 
@@ -560,17 +487,17 @@ mod ledger_tests {
     #[test]
     fn the_ledger_lands_even_when_the_credential_just_rotated() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_OLD"), None, "manual").unwrap();
-        let id = store.codearts_account_record(Region::Cn, "").unwrap()["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(&credential("AK_OLD"), None, "manual").unwrap();
+        let id = store.codearts_account_record("").unwrap()["id"].as_str().unwrap().to_string();
 
         // 模拟「领取前先续了期」：凭据换发并写回，之后再写台账
-        let snapshot = store.codearts_account_record(Region::Cn, "").unwrap();
+        let snapshot = store.codearts_account_record("").unwrap();
         store
             .update_codearts_credentials_if_current(&snapshot, &credential("AK_NEW"))
             .unwrap();
         store.put_codearts_welfare_ledger(&id, &ledger("2026-09-27", 1)).expect("换了凭据也该写得进去");
 
-        let after = store.codearts_account_record(Region::Cn, "").unwrap();
+        let after = store.codearts_account_record("").unwrap();
         assert_eq!(1, after["codeartsWelfare"]["attempts"].as_i64().unwrap(), "台账必须真的落盘");
         assert_eq!("AK_NEW", after["access_key_id"].as_str().unwrap(), "写台账不许顺手洗掉凭据");
     }
@@ -578,8 +505,8 @@ mod ledger_tests {
     #[test]
     fn a_ledger_write_for_a_missing_account_is_an_error_not_a_silent_success() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_A"), None, "manual").unwrap();
-        let id = store.codearts_account_record(Region::Cn, "").unwrap()["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(&credential("AK_A"), None, "manual").unwrap();
+        let id = store.codearts_account_record("").unwrap()["id"].as_str().unwrap().to_string();
         // 领取中途账号被删掉：写回必须报错，调用方据此**不发**写请求
         store.remove_account(&id).unwrap();
         let error = store

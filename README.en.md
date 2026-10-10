@@ -17,7 +17,7 @@ Reverse-proxy capabilities at a glance (✓ supported · ✗ not supported · �
 | Cline (Free / Pass) | ✓ | ✓ | ✓ remote + static fallback | ✓ | — | — |
 | Accio (international / domestic) | ✓ | ✓ | ✓ remote + static fallback | ✓ used-percent only | — | — |
 | ZCode (domestic / international) | ✓ | ✗ | ✗ static table | ✓ plan balance | — | ✓ timed plan (manual) |
-| CodeArts (domestic / international) | ✓ | ✓ one-shot rotation | ✓ remote (three sources merged) | ✓ two ledgers | — | ✓ daily welfare (manual) |
+| CodeArts | ✓ | ✓ one-shot rotation | ✓ remote (three sources merged) | ✓ two ledgers | — | ✓ daily welfare (manual) |
 | Trae | ✓ | ✓ single-use rotation | ✓ remote only | ✓ two ledgers | — | — |
 | Loomy (iFlytek) | ✓ | ✗ no refresh flow | ✓ remote only | ✓ two point ledgers | ✓ daily gifted-points refresh | — |
 | Custom providers | ✓ chat passthrough / Responses / Anthropic | — | ✓ manual + server-side fetch | — | — | — |
@@ -47,7 +47,7 @@ The three chat entry points (`/v1/chat/completions`, `/v1/responses`, `/v1/messa
 Download the installer from Releases (NSIS, Simplified Chinese, installs to `C:\Program Files\Agent2API` by default, and needs administrator approval during setup), then launch it — **no Node or any other runtime required**.
 
 1. First launch starts the local gateway (port 3065) inside the app process and opens the main window. If an older version's data directory or data files are found, a dialog walks you through the migration.
-2. Click "Add account" on the Accounts page, pick a provider (WorkBuddy / Raccoon / CatPaw / AutoClaw domestic / AutoClaw international / Qoder / Cline / Accio international / Accio domestic / ZCode domestic / ZCode international / CodeArts domestic / CodeArts international / Trae / Loomy), then sign in or fill in credentials using whatever that vendor supports: web login, SMS code, pasting credentials, or importing this machine's desktop login state (importing stores no token — the gateway follows once the desktop client signs in again; CodeArts and Trae only offer web login and pasted credentials; Loomy only offers SMS sign-in and pasted session).
+2. Click "Add account" on the Accounts page, pick a provider (WorkBuddy / Raccoon / CatPaw / AutoClaw domestic / AutoClaw international / Qoder / Cline / Accio international / Accio domestic / ZCode domestic / ZCode international / CodeArts / Trae / Loomy), then sign in or fill in credentials using whatever that vendor supports: web login, SMS code, pasting credentials, or importing this machine's desktop login state (importing stores no token — the gateway follows once the desktop client signs in again; CodeArts and Trae only offer web login and pasted credentials; Loomy only offers SMS sign-in and pasted session).
 3. Set your OpenAI client's `base_url` to `http://127.0.0.1:3065/v1` and put anything in `api_key` (for example `sk-local`; the server does not check it while authentication is disabled).
 
 Closing the window only minimizes to the tray by default, and the gateway keeps forwarding in the background; to quit for real, right-click the tray icon and choose "Exit".
@@ -200,9 +200,7 @@ agent2api/
 │  │  │  │  │  │                models (static fallback + /api/llm/config/v2) /
 │  │  │  │  │  │                protocol (OpenAI <-> ADK Gemini-style envelope) /
 │  │  │  │  │  │                chat (session-style forwarding) / stream (ADK SSE unwrapping) / balance
-│  │  │  │  │  ├─ codearts/     CodeArts (Huawei Cloud; domestic / international, region-parameterized):
-│  │  │  │  │  │                region (regional endpoints: cn-north-4 / ap-southeast-1) /
-│  │  │  │  │  │                signer (Huawei Cloud SDK-HMAC-SHA256,
+│  │  │  │  │  ├─ codearts/     CodeArts (Huawei Cloud): signer (Huawei Cloud SDK-HMAC-SHA256,
 │  │  │  │  │  │                byte-for-byte vectors from the reference implementation) /
 │  │  │  │  │  │                credentials / dpop (ES256 DPoP proof) /
 │  │  │  │  │  │                oauth (PKCE web login + loopback callback) / refresh (single-flight) /

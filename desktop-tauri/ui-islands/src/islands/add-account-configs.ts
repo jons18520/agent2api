@@ -203,33 +203,44 @@ const AUTOCLAW_INTL: ProviderConfig = {
   desktopWindowsOnly: true,
 }
 
-/** Qoder：没有「桌面端实时登录态」可导入，因此不生成那一段 */
-const QODER: ProviderConfig = {
-  provider: 'qoder',
-  label: 'Qoder',
-  desktop: false,
-  regionOptions: [
-    { value: 'global', label: '国际版' },
-    { value: 'cn', label: '中国版' },
-  ],
-  webLogin: {
-    // 国际版 / 中国版都有网页登录：两站是同一套 PKCE 设备授权协议，只有站点主机不同。
-    // 因此不设 region 限制 —— 地区分段切到哪一站，这段就登录哪一站。
-    noteHtml: '打开官方授权页完成设备码授权，登录的是「地区」所选那一站的账号。',
-    button: '打开 Qoder 网页登录',
-    busyText: '等待 Qoder 授权完成…',
-    modes: [
-      { value: 'embedded', label: '内嵌窗口（推荐）', hint: '内嵌窗口用全新环境，多账号互不影响；关窗即取消等待' },
-      { value: 'external', label: '系统浏览器', hint: '系统浏览器打开（复用已登录账号）；完成后自动加入列表' },
+/**
+ * Qoder 两个地区（中国版 / 国际版）：同一套设备授权协议，只有站点主机不同。
+ *
+ * 为什么不是一个配置带一个「地区」下拉（拆家，2026-10）：与 AutoClaw / Accio /
+ * ZCode 同一思路 —— 地区是 **provider 身份**而不是账号属性。拆家前两地区账号
+ * 混在一个「模型来源」下拉里、一次「获取模型」只能刷到队首账号所属地区的目录；
+ * 按两家建模后各自有独立的账号、清单与启停（除 id / 标签 / 文案外同构）。
+ */
+function qoderForm(spec: { provider: string; label: string; siteNote: string }): ProviderConfig {
+  const { provider, label, siteNote } = spec
+  return {
+    provider,
+    label,
+    desktop: false,
+    // 地区写死在 provider 身份里（后端按 provider id 反查），不再走地区分段
+    webLogin: {
+      // 两站是同一套 PKCE 设备授权协议，只有站点主机不同；edition 由 provider
+      // 身份决定（后端按 provider id 反查地区，请求里的 edition 只是回显字段）
+      noteHtml: `打开官方授权页完成设备码授权，登录的是${label}（${siteNote}）的账号。`,
+      button: '打开 Qoder 网页登录',
+      busyText: '等待 Qoder 授权完成…',
+      edition: provider === 'qoder' ? 'cn' : 'global',
+      modes: [
+        { value: 'embedded', label: '内嵌窗口（推荐）', hint: '内嵌窗口用全新环境，多账号互不影响；关窗即取消等待' },
+        { value: 'external', label: '系统浏览器', hint: '系统浏览器打开（复用已登录账号）；完成后自动加入列表' },
+      ],
+    },
+    manualTitle: '使用个人访问令牌（PAT）',
+    manualNote: `在${label}的 Qoder 账号设置 → Integrations 生成 PAT（别填 Google / GitHub 的令牌）。两个地区的账号与凭证不通用。`,
+    fields: [
+      { key: 'pat', label: 'Qoder PAT', rows: 3, placeholder: '粘贴 Qoder 个人访问令牌（pt-…）' },
+      { key: 'name', label: '备注名', optional: true, placeholder: '可选，留空使用账号昵称或邮箱' },
     ],
-  },
-  manualTitle: '使用个人访问令牌（PAT）',
-  manualNote: '在 Qoder 账号设置 → Integrations 生成 PAT（别填 Google / GitHub 的令牌）。',
-  fields: [
-    { key: 'pat', label: 'Qoder PAT', rows: 3, placeholder: '粘贴 Qoder 个人访问令牌（pt-…）' },
-    { key: 'name', label: '备注名', optional: true, placeholder: '可选，留空使用账号昵称或邮箱' },
-  ],
+  }
 }
+
+const QODER = qoderForm({ provider: 'qoder', label: '中国版', siteNote: 'qoder.com.cn' })
+const QODER_INTL = qoderForm({ provider: 'qoder-intl', label: '国际版', siteNote: 'qoder.com' })
 
 /**
  * Cline 是两个提供商（Cline Free / Cline Pass）。
@@ -357,9 +368,7 @@ function zcodeForm(spec: { provider: string; label: string; site: string; planNo
 }
 
 /**
- * CodeArts（华为云 AI 代码助手 / snap-access）两个区域（国内版 / 国际版）：
- * 同一套协议、**不同区域网关**（国内 `cn-north-4` / 国际 `ap-southeast-1`，
- * 见后端 `providers::codearts::region` 的模块头），因此输出两份配置。
+ * CodeArts（华为云 AI 代码助手 / snap-access）。
  *
  * ── 网页登录（OAuth 授权码 + PKCE）────────────────────────
  * 授权地址由网关拼（`providers::codearts::oauth::authorize_url`，参数与官方扩展
@@ -380,58 +389,53 @@ function zcodeForm(spec: { provider: string; label: string; site: string; planNo
  * 里面）：拆成六个框会把「粘哪一格」变成六次出错机会，`oauth_context` 本身还是
  * 嵌套对象、框里塞不下。因此一个框整份粘，由 `jsonExpand` 解析后铺开。
  */
-function codeartsForm(spec: { provider: string; label: string; siteNote: string }): ProviderConfig {
-  const { provider, label, siteNote } = spec
-  return {
-    provider,
-    label,
-    // 本家**没有**「读本机客户端登录态」这条后端路径（凭据只能靠网页登录或粘贴）。
-    // 不显式关掉的话，桌面壳里会出现一个选了之后什么都没有的分段：chip 只看
-    // `desktop !== false`，而下面的 desktopNote 缺席就返回空串。
-    // 浏览器面板看不到这个洞（platform()==='web' 时整段收起），只有 App 里会露。
-    desktop: false,
-    webLogin: {
-      noteHtml: `打开华为云 CodeArts <b>${label}</b>的官方授权页登录：登录完成后官方页面会把浏览器带回<b>网关自己的</b> `
-        + '<code>/oauth/callback</code>，网关用一次性授权码换取临时凭据并加入账号列表。'
-        + `<br>${siteNote}`
-        + '<br>网关跑在另一台机器上时，网页端会提示把地址栏中的最终回调地址直接粘贴回面板。',
-      button: `打开 CodeArts ${label}授权页`,
-      busyText: `等待 CodeArts ${label}登录完成…`,
-      modes: [
-        {
-          value: 'embedded',
-          label: '内嵌窗口（推荐）',
-          hint: '将打开内嵌窗口；登录完成后自动加入账号列表。关掉窗口即取消等待',
-        },
-        {
-          value: 'external',
-          label: '系统浏览器',
-          hint: '将用系统默认浏览器打开授权页（会复用浏览器里已登录的华为云账号）；'
-            + '浏览器与网关不在同一台机器时，按上方说明把最终回调地址粘贴回面板',
-        },
-      ],
-    },
-    manualTitle: '粘贴登录凭据',
-    manualNoteHtml: `整份粘贴官方插件 / CLIProxyAPI 落盘的凭据 JSON（形如 `
-      + '<code>{"codearts_provider_credential":{…}}</code>，铺平的也行）。'
-      + '<br>必填：<code>access_key_id</code>、<code>secret_access_key</code>、<code>security_token</code>。'
-      + '<b>要能自动续期，必须连 <code>refresh_token</code> 与 <code>oauth_context</code> 一起粘</b>'
-      + ' —— 临时凭据约一小时到期，缺这半块就续不回来，只能重新登录。'
-      + `<br>${siteNote}`,
-    fields: [
+const CODEARTS: ProviderConfig = {
+  provider: 'codearts',
+  label: 'CodeArts',
+  // 本家**没有**「读本机客户端登录态」这条后端路径（凭据只能靠网页登录或粘贴）。
+  // 不显式关掉的话，桌面壳里会出现一个选了之后什么都没有的分段：chip 只看
+  // `desktop !== false`，而下面的 desktopNote 缺席就返回空串。
+  // 浏览器面板看不到这个洞（platform()==='web' 时整段收起），只有 App 里会露。
+  desktop: false,
+  webLogin: {
+    noteHtml: '打开华为云 CodeArts 的官方授权页登录：登录完成后官方页面会把浏览器带回<b>网关自己的</b> '
+      + '<code>/oauth/callback</code>，网关用一次性授权码换取临时凭据并加入账号列表。'
+      + '<br>网关跑在另一台机器上时，网页端会提示把地址栏中的最终回调地址直接粘贴回面板。',
+    button: '打开 CodeArts 授权页',
+    busyText: '等待 CodeArts 登录完成…',
+    modes: [
       {
-        key: 'credentialJson',
-        label: '凭据 JSON',
-        rows: 8,
-        // 解析后按字段铺开进请求体（后端 `Credential::from_payload` 嵌套/平铺都认）
-        jsonExpand: true,
-        placeholder: '{"codearts_provider_credential":{"access_key_id":"HSTA…","secret_access_key":"…",'
-          + '"security_token":"…","expires_at":"2026-09-27T16:17:00.327Z","domain_id":"…","user_id":"…",'
-          + '"user_name":"…","refresh_token":"eyJ…","oauth_context":{…}}}',
+        value: 'embedded',
+        label: '内嵌窗口（推荐）',
+        hint: '将打开内嵌窗口；登录完成后自动加入账号列表。关掉窗口即取消等待',
       },
-      { key: 'name', label: '备注名', optional: true, placeholder: '可选，留空使用凭据里的 user_name' },
+      {
+        value: 'external',
+        label: '系统浏览器',
+        hint: '将用系统默认浏览器打开授权页（会复用浏览器里已登录的华为云账号）；'
+          + '浏览器与网关不在同一台机器时，按上方说明把最终回调地址粘贴回面板',
+      },
     ],
-  }
+  },
+  manualTitle: '粘贴登录凭据',
+  manualNoteHtml: '整份粘贴官方插件 / CLIProxyAPI 落盘的凭据 JSON（形如 '
+    + '<code>{"codearts_provider_credential":{…}}</code>，铺平的也行）。'
+    + '<br>必填：<code>access_key_id</code>、<code>secret_access_key</code>、<code>security_token</code>。'
+    + '<b>要能自动续期，必须连 <code>refresh_token</code> 与 <code>oauth_context</code> 一起粘</b>'
+    + ' —— 临时凭据约一小时到期，缺这半块就续不回来，只能重新登录。',
+  fields: [
+    {
+      key: 'credentialJson',
+      label: '凭据 JSON',
+      rows: 8,
+      // 解析后按字段铺开进请求体（后端 `Credential::from_payload` 嵌套/平铺都认）
+      jsonExpand: true,
+      placeholder: '{"codearts_provider_credential":{"access_key_id":"HSTA…","secret_access_key":"…",'
+        + '"security_token":"…","expires_at":"2026-09-27T16:17:00.327Z","domain_id":"…","user_id":"…",'
+        + '"user_name":"…","refresh_token":"eyJ…","oauth_context":{…}}}',
+    },
+    { key: 'name', label: '备注名', optional: true, placeholder: '可选，留空使用凭据里的 user_name' },
+  ],
 }
 
 /**
@@ -569,7 +573,10 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   CATPAW,
   AUTOCLAW,
   AUTOCLAW_INTL,
+  // Qoder 两个地区相邻（拆家后是两家 provider，与 AutoClaw / Accio / ZCode
+  // 同一理由）：中国版在前，与存量账号的归属一致
   QODER,
+  QODER_INTL,
   // Cline 顺序即界面上「提供商」分段的顺序：免费池在前（无门槛，更常用）
   clineForm({ provider: 'cline-free', label: 'Cline Free', poolNote: '（免费额度池，模型名带 cline-free/ 前缀）。' }),
   clineForm({ provider: 'cline-pass', label: 'Cline Pass', poolNote: '（订阅池，模型名带 cline-pass/ 前缀，需要账号有对应订阅）。' }),
@@ -579,11 +586,9 @@ export const BUILTIN_CONFIGS: ProviderConfig[] = [
   // ZCode 顺序：国内版在前（国内网络环境下更常被添加的那个，与后端注册表 PROVIDERS 的排列一致）
   zcodeForm({ provider: 'zcode', label: '国内版', site: 'open.bigmodel.cn', planNote: '国内版与**国际版是两套独立的账号与套餐**，凭证与领取的套餐都不通用。' }),
   zcodeForm({ provider: 'zcode-intl', label: '国际版', site: 'api.z.ai', planNote: '国际版的推理站点是 api.z.ai，与国内版不是同一站；套餐也各自独立。' }),
-  // CodeArts（华为云 AI 代码助手）两个区域：同一套协议、不同区域网关。
-  // 顺序：国内版在前（与后端注册表 PROVIDERS 的排列一致）。
-  // 两地的**凭据不通用**（STS 签发地不同），所以是两套独立的账号。
-  codeartsForm({ provider: 'codearts', label: '国内版', siteNote: '国内版与<b>国际版是两套独立的账号</b>（STS 签发地不同），凭据不通用。' }),
-  codeartsForm({ provider: 'codearts-intl', label: '国际版', siteNote: '国际版只在华为云 <b>AP-Singapore</b> 区域提供，与国内版不是同一套区域网关。' }),
+  // CodeArts（华为云 AI 代码助手）：一家一个 provider，没有地区/额度池之分
+  // （region 写死 cn-north-4，与 token 签发地必须一致）。
+  CODEARTS,
   // Trae 只有 SOLO 那一家（没有地区分叉，理由见 TRAE 上方那段）
   TRAE,
   // Loomy（讯飞）：单一入口（手机验证码登录），排在末尾 —— 与后端注册表

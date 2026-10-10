@@ -712,10 +712,8 @@ impl LoginService {
         // 为什么不是「按 state 取 code」那套：portal 的回调**可能只带一个 code**、
         // 不带我们的配对信息，收尾要「逐个候选试 verifier」，还要认第一次回调下发的
         // secret（ticket 兜底通道）。整套判定都在 `core::login::codearts` 里，
-        // 这里只负责把 URL 的查询串拆给它。**两个区域（国内版 / 国际版）都走这条**：
-        // 区域由这一轮待办条目自己记着（`PendingLogin::region`），收尾函数按它
-        // 取对应区域的 STS 与账号集合。
-        if crate::server::core::providers::codearts::region::Region::from_kind(kind).is_some() {
+        // 这里只负责把 URL 的查询串拆给它。
+        if kind == ProviderKind::CodeArts {
             let params: std::collections::HashMap<String, String> = url::Url::parse(callback_url)
                 .ok()
                 .map(|parsed| {

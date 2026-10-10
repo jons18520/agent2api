@@ -646,8 +646,9 @@ fn allowed_hosts(provider: &str) -> Option<&'static [&'static str]> {
         // Trae 必须显式列在这里：落进默认分支会拿到 WorkBuddy 的白名单，
         // 那张表**既没有** `trae.cn`（授权页）**也没有** `127.0.0.1`（回调），
         // 症状正是本文件上面警告的那种 —— 窗口一片空白，日志什么也看不出。
-        "catpaw" | "qoder" | "cline-free" | "cline-pass" | "autoclaw" | "autoclaw-intl"
-        | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "codearts-intl" | "trae" | "kuku" => None,
+        "catpaw" | "qoder" | "qoder-intl" | "cline-free" | "cline-pass" | "autoclaw"
+        | "autoclaw-intl" | "accio" | "accio-cn" | "zcode" | "zcode-intl" | "codearts" | "trae"
+        | "kuku" => None,
         // WorkBuddy 的两个地区共用这一张表（表里 `workbuddy.ai` 那一行就是国际站
         // 的登录域）。**显式列出**而不是靠下面的默认分支：上面那条警告要求
         // 「新 provider 落到默认分支」必须是有意的选择，写出来才看得出是选过的
@@ -800,7 +801,10 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 少了它前端会收到「未知的 provider」而登录按钮直接失败。
         "workbuddy-intl" => Ok("workbuddy-intl"),
         "raccoon" => Ok("raccoon"),
+        // Qoder 两个地区（2026-10 拆家后是独立 provider）：设备授权两站同构，
+        // 壳侧只透传 provider id，地区由后端按 id 反查（与 ZCode 同款）。
         "qoder" => Ok("qoder"),
+        "qoder-intl" => Ok("qoder-intl"),
         "catpaw" => Ok("catpaw"),
         "cline-free" => Ok("cline-free"),
         "cline-pass" => Ok("cline-pass"),
@@ -826,9 +830,7 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
         // 轮询 —— 与 ZCode 同一条路。它的回调由 portal 拼成
         // `http://127.0.0.1:<网关端口>/oauth/callback` 落回网关自己，所以窗口
         // **必须允许**导航到本机端口（见下面 allowed_hosts 的同一条）。
-        // 两个区域（国内版 / 国际版）走同一条路：授权地址由各自区域适配器现拼。
         "codearts" => Ok("codearts"),
-        "codearts-intl" => Ok("codearts-intl"),
         // Trae（SOLO CN）：授权地址由**后端**问上游 guidance 拼（PKCE + 回调 URL），
         // 壳侧只负责开窗口与轮询 —— 与 ZCode 同一条路。特别地，它的回调落在
         // `http://127.0.0.1:<随机端口>/authorize`（网关自己监听的那台 loopback，
@@ -1064,19 +1066,16 @@ pub async fn start(
     // （`cline-free` / `cline-pass`），池已经在 provider id 里，没有第二个旋钮 ——
     // 这里再算一遍 edition 就是多余的一处状态（还会与 provider 冲突时说不清谁算数）。
     let edition_id = match provider {
-        "qoder" => {
-            if edition == "intl" || edition == "global" { "intl" } else { "cn" }
-        }
+        // Qoder 两家 provider 各自固定地区（界面上是两张卡片，没有地区下拉），
+        // 归属已经在 provider id 里 —— 与 ZCode 同款，不再读 edition 形参。
+        "qoder" => "cn",
+        "qoder-intl" => "intl",
         // ZCode 的两个地区由 **provider 本身**决定（界面上是两张卡片，
         // 没有地区下拉，因此面板不会传 `edition`）。不看 `edition` 形参的
         // 后果只是标题里的「国内版/国际版」四个字，但既然信息已经在
         // provider id 里，就不该再去读一个恒为空的形参。
         "zcode" => "cn",
         "zcode-intl" => "intl",
-        // CodeArts 的两个区域同理（界面上是两张卡片，没有地区下拉）：
-        // 归属已经在 provider id 里，这里只把它翻成标题/日志用的地区名。
-        "codearts" => "cn",
-        "codearts-intl" => "intl",
         // WorkBuddy 国际版同理（拆家后它是独立 provider）：归属已经在 provider id
         // 里，这里只把它翻成标题/日志用的地区名。面板仍会同时传 `edition`
         // （同一块里的分段控件），两者一致时无所谓，不一致时**以 provider 为准**
@@ -1134,7 +1133,9 @@ pub async fn start(
     // 其余家各自点名 —— 少写一家只会让标题显示成「登录 WorkBuddy 国内版账号」
     // 而实际打开的是别家的页面，用户第一眼就会以为是点错了按钮。
     let provider_label = match provider {
-        "qoder" => "Qoder",
+        // Qoder 两家品牌名自带地区（两张卡片、无地区下拉），标题不拼后缀
+        "qoder" => "Qoder 中国版",
+        "qoder-intl" => "Qoder 国际版",
         "cline-free" => "Cline Free",
         "cline-pass" => "Cline Pass",
         "catpaw" => "CatPaw",
@@ -1143,10 +1144,10 @@ pub async fn start(
         // 要跳过 edition 后缀，否则会得到「登录 ZCode 国内版 国内版账号」
         "zcode" => "ZCode 国内版",
         "zcode-intl" => "ZCode 国际版",
-        // CodeArts 两个区域各自点名，且品牌名里**已经带了地区** —— 因此下面拼标题时
-        // 要跳过 edition 后缀，否则会得到「登录 CodeArts 国内版 国内版账号」
-        "codearts" => "CodeArts 国内版",
-        "codearts-intl" => "CodeArts 国际版",
+        // CodeArts 只有一家（region 固定在 cn-north-4 且必须与 token 签发地
+        // 一致，不是用户可选项，见 `providers::codearts` 的模块头），
+        // 品牌名里不需要地区
+        "codearts" => "CodeArts",
         // Trae 只有一家（国内 SOLO 通道；国际版是另一套协议、另立 provider id），
         // 品牌名里不需要地区
         "trae" => "Trae",
@@ -1157,7 +1158,8 @@ pub async fn start(
     // 账号」「登录 ZCode 国内版 国内版账号」这种说不通的标题）
     let title = if matches!(
         provider,
-        "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "codearts-intl" | "trae"
+        "cline-free" | "cline-pass" | "zcode" | "zcode-intl" | "codearts" | "trae" | "qoder"
+        | "qoder-intl"
     ) {
         format!("登录 {provider_label} 账号")
     } else {

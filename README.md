@@ -17,7 +17,7 @@
 | Cline（Free / Pass） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ | — | — |
 | Accio（国际版 / 国内版） | ✓ | ✓ | ✓ 远程 + 静态兜底 | ✓ 用量百分比 | — | — |
 | ZCode（国内版 / 国际版） | ✓ | ✗ | ✗ 静态表 | ✓ 套餐余额 | — | ✓ 限时套餐（手动） |
-| CodeArts（国内版 / 国际版） | ✓ | ✓ 一次性轮换 | ✓ 远程（三源合并） | ✓ 两份账 | — | ✓ 每日福利（手动） |
+| CodeArts | ✓ | ✓ 一次性轮换 | ✓ 远程（三源合并） | ✓ 两份账 | — | ✓ 每日福利（手动） |
 | Trae | ✓ | ✓ 一次一换 | ✓ 仅远程 | ✓ 两份账 | — | — |
 | Loomy（讯飞） | ✓ | ✗ 无续期接口 | ✓ 仅远程 | ✓ 两份积分账 | ✓ 每日赠送积分刷新 | — |
 | 自定义提供商 | ✓ Chat 透传 / Responses / Anthropic | — | ✓ 手动登记 + 服务端拉取 | — | — | — |
@@ -47,7 +47,7 @@
 从 Releases 下载安装包（NSIS，简体中文，默认装到 `C:\Program Files\Agent2API`，安装时需要管理员授权），安装后启动即可，**无需安装 Node 或任何其它运行时**。
 
 1. 首次启动即在应用进程内启动本机网关（端口 3065）并打开主窗口；若检测到旧版本的数据目录或数据文件，会弹窗提示迁移，按指引操作即可。
-2. 点「账号」页的「添加账号」，选提供商（WorkBuddy / 小浣熊 / CatPaw / AutoClaw 国内版 / AutoClaw 国际版 / Qoder / Cline / Accio 国际版 / Accio 国内版 / ZCode 国内版 / ZCode 国际版 / CodeArts 国内版 / CodeArts 国际版 / Trae / Loomy），再按该家支持的方式完成登录或填写凭证：网页登录、手机验证码、粘贴凭证，或导入本机桌面端登录态（导入不落 token，客户端重新登录后网关自动跟上；CodeArts 与 Trae 只有网页登录与粘贴凭证两种，Loomy 只有手机验证码与粘贴 session 两种）。
+2. 点「账号」页的「添加账号」，选提供商（WorkBuddy / 小浣熊 / CatPaw / AutoClaw 国内版 / AutoClaw 国际版 / Qoder / Cline / Accio 国际版 / Accio 国内版 / ZCode 国内版 / ZCode 国际版 / CodeArts / Trae / Loomy），再按该家支持的方式完成登录或填写凭证：网页登录、手机验证码、粘贴凭证，或导入本机桌面端登录态（导入不落 token，客户端重新登录后网关自动跟上；CodeArts 与 Trae 只有网页登录与粘贴凭证两种，Loomy 只有手机验证码与粘贴 session 两种）。
 3. 把 OpenAI 客户端的 `base_url` 填成 `http://127.0.0.1:3065/v1`，`api_key` 随便填（例如 `sk-local`，未启用鉴权时服务端不校验）。
 
 关闭窗口默认只是最小化到托盘，网关继续在后台转发；要彻底退出请在托盘图标上右键选「退出」。
@@ -210,9 +210,7 @@ agent2api/
 │  │  │  │  │  │                models（静态兜底 + /api/llm/config/v2）/
 │  │  │  │  │  │                protocol（OpenAI ↔ ADK 的 Gemini 风格信封）/
 │  │  │  │  │  │                chat（会话式转发）/ stream（ADK SSE 解包）/ balance
-│  │  │  │  │  ├─ codearts/     CodeArts（华为云码道；国内版 / 国际版按 region 参数化）：
-│  │  │  │  │  │                region（区域端点：cn-north-4 / ap-southeast-1）/
-│  │  │  │  │  │                signer（华为云 SDK-HMAC-SHA256，
+│  │  │  │  │  ├─ codearts/     CodeArts（华为云码道）：signer（华为云 SDK-HMAC-SHA256，
 │  │  │  │  │  │                与参考实现逐字节对账）/ credentials / dpop（ES256 DPoP proof）/
 │  │  │  │  │  │                oauth（PKCE 网页登录 + loopback 回调）/ refresh（单飞续期）/
 │  │  │  │  │  │                session（chat-session 心跳与每账号并发准入）/ chat（会话式转发）/

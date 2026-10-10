@@ -14,6 +14,7 @@
 
 pub mod balance;
 pub mod chat;
+pub mod onboarding;
 pub mod welfare;
 pub mod credentials;
 pub mod dpop;
@@ -21,9 +22,9 @@ pub mod models;
 pub mod oauth;
 pub mod redact;
 pub mod refresh;
-pub mod region;
 pub mod session;
 pub mod signer;
+pub mod size_gate;
 pub mod stream_fault;
 
 use std::pin::Pin;
@@ -43,29 +44,33 @@ use super::adapter::{ChatRequestPlan, ProviderAdapter, UpstreamErrorClass};
 static SESSION_GATE: std::sync::OnceLock<session::SessionGate> = std::sync::OnceLock::new();
 use crate::server::core::providers::ProviderKind;
 
-/// CodeArts 适配器。持有**区域**（国内版 / 国际版）—— 这是两地唯一的差别来源：
-/// 区域网关、STS、网页登录门户、目录缓存槽、账号集合全部由它决定
-/// （见 `region` 的模块头）。其余字段无状态（目录缓存在 `models` 里，凭据在账号
-/// 存储里）。
-pub struct CodeArtsAdapter {
-    region: region::Region,
-}
+/// CodeArts 适配器（无状态字段：目录缓存在 `models` 里，凭据在账号存储里）。
+pub struct CodeArtsAdapter;
 
-/// 国内版静态实例（`adapter_for` 要的是 `&'static dyn ProviderAdapter`）。
-pub static CODEARTS_ADAPTER: CodeArtsAdapter = CodeArtsAdapter { region: region::Region::Cn };
-/// 国际版静态实例。与国内版是**两个 provider、两个实例**（同一份实现的按区域
-/// 参数化，与 AutoClaw / Accio / ZCode 同款）。
-pub static CODEARTS_INTL_ADAPTER: CodeArtsAdapter = CodeArtsAdapter { region: region::Region::Intl };
+/// 静态实例：`adapter_for` 要的是 `&'static dyn ProviderAdapter`。
+pub static CODEARTS_ADAPTER: CodeArtsAdapter = CodeArtsAdapter;
 
 impl CodeArtsAdapter {
     /// 从账号记录读回凭据（账号存储写的就是 `Credential` 的字段名）。
     pub fn credential(record: &Value) -> Result<credentials::Credential, GatewayError> {
         credentials::Credential::from_payload(record).map_err(|reason| GatewayError::with_status(503, reason))
     }
+}
 
-    /// 本适配器的区域。
-    pub fn region(&self) -> region::Region {
-        self.region
+/// 登记尺寸门（体积墙可能走在 HTTP 状态上，也可能走在 SSE 第一帧里，三处出口共用这份）。
+///
+/// 只在**从放行变成挡住**那一次打一行终端日志：门存续期内每发大请求都会命中判据，
+/// 逐请求打就是刷屏。
+fn note_size_gate(reason: Option<&'static str>, wire_bytes: i64) {
+    let Some(reason) = reason else { return };
+    if size_gate::hold(wire_bytes, logging::now_ms()) {
+        logging::console_line(
+            "[Routing]",
+            &format!(
+                "⚠️ CodeArts 的尺寸门已登记：{}（本次发出 {} 字节），同尺寸或更大的请求暂时绕开这一家",
+                reason, wire_bytes
+            ),
+        );
     }
 }
 
@@ -94,12 +99,12 @@ fn benefit_cooldown_group(catalog: &models::Catalog, wire_model: &str) -> Vec<St
 
 impl ProviderAdapter for CodeArtsAdapter {
     fn kind(&self) -> ProviderKind {
-        self.region.kind()
+        ProviderKind::CodeArts
     }
 
     /// 清单来自刷新链路落的进程内缓存（`list_models` 是同步契约，发不了网络请求）。
     fn list_models(&self) -> Vec<Value> {
-        models::list(self.region)
+        models::list()
     }
 
     /// 防御性报错：CodeArts 的对话要先占会话槽（每账号 3 路并发）、再签一次名、
@@ -139,17 +144,15 @@ impl ProviderAdapter for CodeArtsAdapter {
         telemetry: &'a std::sync::Arc<RequestTelemetry>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ForwardOutcome, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            // 本区域的两台网关地址（区域网关 + 可选福利网关），后面多处要用
-            let base_url = self.region.base_url();
             // ① 凭据（含临期主动续期与写回）；代理沿用编排层为本账号解析出的那份
-            let credential = refresh::ensure_fresh(store, self.region, account_id, false, proxy.as_ref()).await?;
+            let credential = refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await?;
             if !credential.valid() {
                 return Err(GatewayError::with_status(503, "CodeArts 账号缺少可用的临时凭据，请重新登录"));
             }
 
             // ② 模型名归一：客户端习惯小写，上游要真名；福利模型要带 maas_type
             let requested = body.get("model").and_then(Value::as_str).unwrap_or("").trim();
-            let catalog = models::cached_catalog(self.region).ok_or_else(|| GatewayError::with_status(
+            let catalog = models::cached_catalog().ok_or_else(|| GatewayError::with_status(
                 503,
                 "CodeArts 模型目录还没拉取过：请先在模型页对该账号执行一次「获取模型」",
             ))?;
@@ -158,6 +161,38 @@ impl ProviderAdapter for CodeArtsAdapter {
             };
             let benefit = model.source.needs_benefit_header();
             let upstream_model = model.id.clone();
+
+            // ②.5 尺寸门：这一家刚在「体 ≥ N 字节」上被上游拒过（TTL 内），同尺寸的
+            // 就别再发出去 —— 上游那道墙按字节判，重发同一份体结论不变（实测见
+            // [`chat::size_rejection`]：6 MB 级回 400 PARSE_REQUEST_DATA_EXCEPTION、
+            // 12 MB 级回 413，两者都在出门之后才发生，白烧一次往返）。
+            //
+            // 估的是客户端 body 的字节数（**只在有门时**才付这一次序列化：无门是常态，
+            // 常态路径零额外开销），比真实发出量小（本家还要塞会话 id、可能抬 max_tokens），
+            // 所以直接 `estimate >= floor` 会在墙边上漏放一发 ——
+            // dev 实测就是这个 32 字节：估 8,146,988 vs 真值 8,147,020，门形同虚设。
+            // 留 64 KiB 的余量（远大于本家自己加的那些字段），代价是「比上界小不到
+            // 64 KiB」的请求会被保守挡一次；比起每 120 秒白撞一发 8 MB 往返，这笔账划算。
+            const ESTIMATE_SLACK_BYTES: i64 = 64 * 1024;
+            let now_ms = logging::now_ms();
+            if let Some(floor) = size_gate::floor(now_ms) {
+                let estimate = serde_json::to_string(body)
+                    .map(|text| text.len() as i64)
+                    .unwrap_or_default();
+                if estimate + ESTIMATE_SLACK_BYTES >= floor {
+                    return Err(GatewayError::with_status(
+                        i32::from(size_gate::BLOCKED_STATUS),
+                        format!(
+                            "CodeArts 发不出这么大的请求体（本次约 {} 字节，这一家已知 ≥ {} 字节会被上游拒）：\
+                             本轮绕开这一家，最长 {} 秒后会重新探一次；\
+                             要立刻可用就减小上下文（少带历史 / 别整份贴文件）",
+                            estimate,
+                            floor,
+                            size_gate::ms_left(now_ms) / 1000
+                        ),
+                    ));
+                }
+            }
 
             // ③ 本地准入（满员回 409，不冷却账号）。
             // 身份优先用凭据里的 domain+user；两个都取不到时退到**账号行 id**
@@ -171,15 +206,15 @@ impl ProviderAdapter for CodeArtsAdapter {
             // 只按硬编码默认值准入的话，那个数字对本家就只是装饰（口径与
             // `session::SessionGate::limit_for` 里写的「0 = 继承默认」一致）。
             let gate_override = store
-                .codearts_account_record(self.region, account_id)
+                .codearts_account_record(account_id)
                 .and_then(|record| record.get("maxConcurrent").and_then(Value::as_u64));
             let permit = SESSION_GATE
                 .get_or_init(|| session::SessionGate::new(session::DEFAULT_SESSION_LIMIT))
-                .acquire(&base_url, &gate_identity, gate_override)?;
+                .acquire(models::DEFAULT_BASE_URL, &gate_identity, gate_override)?;
 
             // ④ 占一个上游会话槽（心跳 busy + 后台续期）
             let mut options = session::SessionOptions::new(
-                &base_url,
+                models::DEFAULT_BASE_URL,
                 &credential,
                 chat::DEFAULT_LANGUAGE,
             );
@@ -219,7 +254,7 @@ impl ProviderAdapter for CodeArtsAdapter {
                     );
                 }
                 match chat::build_upstream_request(
-                    &base_url,
+                    models::DEFAULT_BASE_URL,
                     &upstream_model,
                     outbound,
                     true,
@@ -239,6 +274,8 @@ impl ProviderAdapter for CodeArtsAdapter {
             for (name, value) in headers {
                 request = request.header(name.as_str(), value.as_str());
             }
+            // 真实发出量：只有这里知道（上游那道墙按它判），也是观测要的那个数
+            let wire_bytes = payload.len() as i64;
             let response = match request.body(payload).send().await {
                 Ok(response) => response,
                 Err(error) => {
@@ -257,20 +294,54 @@ impl ProviderAdapter for CodeArtsAdapter {
                 // 有预算地读：见 `chat::read_error_body`（它同时把 truncated 如实带出来，
                 // 让脱敏那条"末尾正好是秘密前缀"的分支真的会被走到）
                 let (error_body, truncated) = chat::read_error_body(response).await;
+                let error_text = String::from_utf8_lossy(&error_body).to_string();
+                let size_reason = chat::size_rejection_any(status, &error_text, wire_bytes);
+                // 判据没命中但状态是 400/413/502 时，把原始诊断体露一小截：这道墙的
+                // 症状散在不同层（HTTP 状态 vs SSE 帧），靠猜改不动它。
+                // 只在 verbose 下打（生产默认关），截 200 字，绝不整份进日志。
+                if matches!(status, 400 | 413 | 502) && size_reason.is_none() {
+                    let preview: String = error_text.chars().take(200).collect();
+                    logging::verbose(
+                        "[CodeArts]",
+                        &format!("非 2xx 诊断体（尺寸判据未命中，前 200 字）：{preview}"),
+                    );
+                }
+                // 体积被拒 ⇒ 按**真值**登记尺寸门，下一轮同尺寸的在 ②.5 就被挡在本地。
+                note_size_gate(size_reason, wire_bytes);
                 session.stop().await;
                 drop(permit);
+                telemetry.note_attempt_body_bytes(wire_bytes);
                 return Err(chat::upstream_http_error(status, &error_body, &credential, truncated));
             }
+
+            // 发出量落账（成功与失败都记：这条要回答的是「这类会话到底多大」，
+            // 只记失败的那次就永远看不到分布）
+            telemetry.note_attempt_body_bytes(wire_bytes);
 
             // ⑦ 首包门：一个字节都没下发之前就决定"交出去"还是"换账号"
             let (prefetched, rest) = match chat::prefetch_head(response).await {
                 Ok(head) => head,
                 Err(error) => {
+                    // 首包门就把故障帧判掉了 —— 尺寸墙正是从这里出去的（dev 实测：
+                    // 8 MB 那发在 `prefetch_head` 里就成了故障），所以登记必须在这里；
+                    // 放在 ⑦.5 的那些分支上永远摸不到，门一次也不会立起来。
+                    note_size_gate(
+                        chat::size_rejection_any(0, &error.message, wire_bytes),
+                        wire_bytes,
+                    );
                     session.stop().await;
                     drop(permit);
                     return Err(error);
                 }
             };
+
+            // ⑦.5 体积墙也走在**流里**：HTTP 200 + 一帧 `InferHub.001001005.400`
+            // 才是真结论（dev 实测 8 MB 那发就是这样回来的，标记只在
+            // `details[].error_code`）。尺寸类失败必然出现在第一帧，所以扫头部字节就够。
+            note_size_gate(
+                chat::size_rejection_any(0, &String::from_utf8_lossy(&prefetched), wire_bytes),
+                wire_bytes,
+            );
 
             if !stream {
                 // 非流式：把剩下的读完再折叠（上游只有流式，与参考实现同一做法）
@@ -289,6 +360,11 @@ impl ProviderAdapter for CodeArtsAdapter {
                 if let Some(error) = read_error {
                     return Err(GatewayError::with_status(502, format!("CodeArts 上游流中断：{error}")));
                 }
+                // 折叠前用完整体再判一次（第一帧没中时兜住；同扇门内重复登记不会再打日志）
+                note_size_gate(
+                    chat::size_rejection_any(0, &String::from_utf8_lossy(&all), wire_bytes),
+                    wire_bytes,
+                );
                 let completion = chat::aggregate_sse(&all, &upstream_model)?;
                 // 用量旁路记账：聚合体里那份 usage 是上游给的，报一次进请求日志
                 // （流式那份由 `UsageSniffer` 负责，两条路都缺了就又是恒 0）
@@ -423,7 +499,7 @@ impl ProviderAdapter for CodeArtsAdapter {
     /// （目录还没拉过 / 已下架）或不是福利源时，只记本次的真名，与默认行为
     /// 一致。纯逻辑在模块级 [`benefit_cooldown_group`]（吃目录参数，可测）。
     fn quota_cooldown_models(&self, _account_id: &str, wire_model: &str) -> Vec<String> {
-        match models::cached_catalog(self.region) {
+        match models::cached_catalog() {
             Some(catalog) => benefit_cooldown_group(&catalog, wire_model),
             None => vec![wire_model.to_string()],
         }
@@ -448,8 +524,8 @@ impl ProviderAdapter for CodeArtsAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            let proxy = record_proxy(store, self.region, account_id)?;
-            Ok(refresh::ensure_fresh(store, self.region, account_id, false, proxy.as_ref())
+            let proxy = record_proxy(store, account_id)?;
+            Ok(refresh::ensure_fresh(store, account_id, false, proxy.as_ref())
                 .await?
                 .access_key_id)
         })
@@ -469,8 +545,8 @@ impl ProviderAdapter for CodeArtsAdapter {
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let proxy = record_proxy(store, self.region, account_id)?;
-            Ok(refresh::ensure_fresh(store, self.region, account_id, true, proxy.as_ref())
+            let proxy = record_proxy(store, account_id)?;
+            Ok(refresh::ensure_fresh(store, account_id, true, proxy.as_ref())
                 .await?
                 .access_key_id)
         })
@@ -481,7 +557,7 @@ impl ProviderAdapter for CodeArtsAdapter {
     /// 后台不刷的话，闲置一阵后的第一个请求要先付一次换证的延时）。
     fn credentials_expiring(&self, store: &AccountStore, account_id: &str) -> bool {
         store
-            .codearts_account_record(self.region, account_id)
+            .codearts_account_record(account_id)
             .and_then(|record| credentials::Credential::from_payload(&record).ok())
             .is_some_and(|credential| credential.can_refresh() && credential.needs_refresh(refresh::REFRESH_LEAD_MS, crate::server::logging::now_ms()))
     }
@@ -505,13 +581,40 @@ impl ProviderAdapter for CodeArtsAdapter {
         Box::pin(async move {
             let credential = welfare::current_credential(store, account_id).await?;
             let (statistics, benefit) = balance::fetch_both(
-                &self.region.base_url(),
-                self.region.benefit_gateway_url().as_deref().unwrap_or(""),
+                models::DEFAULT_BASE_URL,
+                models::DEFAULT_BENEFIT_GATEWAY_URL,
                 &credential,
                 chat::DEFAULT_LANGUAGE,
                 chat::DEFAULT_PLUGIN_VERSION,
             )
             .await;
+            // ── 「无 benefit 档案」先自动注册一次再重查 ─────────────────
+            // benefit 记录不是开账号就有的：官方客户端每次启动都 POST claim
+            // （幂等建档，见 `balance::claim_benefit` 的模块注释），没走过这一步
+            // 的账号 InferHub 一律 `4004.200 benefit not found` 拒答。官方客户端
+            // 「登录用一下就好了」正是这条在起作用 —— 余额查询是每分钟自动跑的，
+            // 把注册挂在这里，新账号在一次查询内自愈，不必再借官方客户端渡一次。
+            // 去抖：注册是写语义的幂等调用，没必要每分钟补一发（10 分钟一次足够）。
+            let mut benefit = benefit;
+            if matches!(&benefit, Ok(None)) && benefit_claim_due(account_id) {
+                match balance::claim_benefit(models::DEFAULT_BENEFIT_GATEWAY_URL, &credential).await {
+                    Ok(_) => {
+                        benefit = balance::fetch_benefit_balance(
+                            models::DEFAULT_BENEFIT_GATEWAY_URL,
+                            &credential,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        // 注册失败（网络/签名/上游）不该把「无档案」升级成整次失败：
+                        // 下一轮余额查询会再试（去抖窗过后）。原样保留 absent 结果。
+                        crate::server::logging::verbose(
+                            "[CodeArts]",
+                            &format!("benefit 自动注册失败（账号 {account_id}）：{}", error.message),
+                        );
+                    }
+                }
+            }
             // 两边都失败才算整次失败（一边失败不抹掉另一边）。
             // 注意「无福利」（`Ok(None)`）不是失败 —— 它是账号的正常状态
             // （福利按活动下发，Free 账号常常没有），见 balance.rs 的
@@ -566,7 +669,6 @@ impl ProviderAdapter for CodeArtsAdapter {
     /// 会互相把对方的待办取空（先到的赢、后到的 404）。所以入口只有一个。
     fn build_login_url(&self) -> Option<(String, String)> {
         let (url, pending) = oauth::begin_login(
-            self.region,
             chat::DEFAULT_PLUGIN_NAME,
             chat::DEFAULT_PLUGIN_VERSION,
             chat::DEFAULT_LANGUAGE,
@@ -605,23 +707,20 @@ impl ProviderAdapter for CodeArtsAdapter {
             // 重试」挡住 —— 那次「失败」发生在账号存在之前（10:27）。
             // 与 accio / qoder 逐字同口径：自动路径 `unchanged()`（没刷，
             // 不是失败），点名取不到才 `failed()`。
-            if store.codearts_account_record(self.region, account_id).is_none() {
+            if store.codearts_account_record(account_id).is_none() {
                 crate::server::logging::verbose("[Models]", "CodeArts 模型目录刷新跳过：尚未添加 CodeArts 账号");
                 if account_id.trim().is_empty() {
                     return super::adapter::ModelRefreshOutcome::unchanged();
                 }
                 return super::adapter::ModelRefreshOutcome::failed("指定的 CodeArts 账号不存在或不可用，请重新选择");
             };
-            let credential = match proxy_and_fresh(store, self.region, account_id).await {
+            let credential = match proxy_and_fresh(store, account_id).await {
                 Ok(credential) => credential,
                 Err(error) => return super::adapter::ModelRefreshOutcome::failed(error.message),
             };
-            // 区域端点：国际版没有福利网关（`None`），`discover` 会自动跳过那个源
-            let base_url = self.region.base_url();
-            let benefit_gateway_url = self.region.benefit_gateway_url();
             let endpoints = models::CatalogEndpoints {
-                base_url: &base_url,
-                benefit_gateway_url: benefit_gateway_url.as_deref(),
+                base_url: models::DEFAULT_BASE_URL,
+                benefit_gateway_url: Some(models::DEFAULT_BENEFIT_GATEWAY_URL),
                 plugin_version: chat::DEFAULT_PLUGIN_VERSION,
                 language: chat::DEFAULT_LANGUAGE,
             };
@@ -632,7 +731,7 @@ impl ProviderAdapter for CodeArtsAdapter {
                 );
             }
             let count = catalog.models.len();
-            models::store_catalog(self.region, catalog);
+            models::store_catalog(catalog);
             super::adapter::ModelRefreshOutcome::refreshed(count)
         })
     }
@@ -643,11 +742,10 @@ impl ProviderAdapter for CodeArtsAdapter {
 /// "上游超时"，而不是"你配的代理解析不了"）。
 fn record_proxy(
     store: &AccountStore,
-    region: region::Region,
     account_id: &str,
 ) -> Result<Option<crate::server::core::proxies::ResolvedProxy>, GatewayError> {
     let record = store
-        .codearts_account_record(region, account_id)
+        .codearts_account_record(account_id)
         .ok_or_else(|| GatewayError::with_status(503, "没有可用的 CodeArts 账号：请在账号页添加并启用账号"))?;
     use crate::server::core::proxies::ProxyResolution;
     match crate::server::core::proxies::resolve_account_proxy(record.get("proxy")) {
@@ -658,13 +756,33 @@ fn record_proxy(
 }
 
 /// 没有编排层代理解析的那两条钩子（面板点刷新 / 目录刷新）用的组合。
-async fn proxy_and_fresh(
-    store: &AccountStore,
-    region: region::Region,
-    account_id: &str,
-) -> Result<credentials::Credential, GatewayError> {
-    let proxy = record_proxy(store, region, account_id)?;
-    refresh::ensure_fresh(store, region, account_id, false, proxy.as_ref()).await
+async fn proxy_and_fresh(store: &AccountStore, account_id: &str) -> Result<credentials::Credential, GatewayError> {
+    let proxy = record_proxy(store, account_id)?;
+    refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await
+}
+
+/// benefit 自动注册（claim）的**进程级去抖**：距上次尝试不足窗口期返回 false。
+///
+/// 自动余额查询默认每分钟跑一次，「无档案」的账号若不加去抖就会每分钟被补发一次
+/// claim —— 调用幂等但没必要（官方客户端也就是每次启动一发）。10 分钟取的是
+/// 「自愈要快，但也不在网关故障时把节奏打满」的中间值；表只增不减，量级就是
+/// 本机的 CodeArts 账号数，不值得做清理。返回 true 表示这次该发（并记下时刻）。
+fn benefit_claim_due(account_id: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    const WINDOW: Duration = Duration::from_secs(600);
+    static LAST: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let map = LAST.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = match map.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.get(account_id).is_some_and(|at| at.elapsed() < WINDOW) {
+        return false;
+    }
+    guard.insert(account_id.to_string(), Instant::now());
+    true
 }
 
 /// 把上游原文拼成统一文案的一截（空则不拼）。
@@ -720,8 +838,7 @@ mod store_hooks {
     use crate::server::db::Db;
 
     use super::{benefit_cooldown_group, daily_pool_reset_at, models};
-    use super::region::Region;
-    use super::{CODEARTS_ADAPTER, ProviderAdapter};
+    use super::{CODEARTS_ADAPTER, CodeArtsAdapter, ProviderAdapter};
 
     static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -758,9 +875,9 @@ mod store_hooks {
     fn expiring_follows_the_lead_window_and_a_usable_refresh_chain() {
         let store = store();
         // 三条各代表一种「后台维护该不该动手」：远端到期 / 只剩五分钟 / 临期但刷不了
-        store.add_codearts_account(Region::Cn, &credential("AK_FAR", "far", 120, true), None, "manual").unwrap();
-        store.add_codearts_account(Region::Cn, &credential("AK_NEAR", "near", 5, true), None, "manual").unwrap();
-        store.add_codearts_account(Region::Cn, &credential("AK_BARE", "bare", 5, false), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_FAR", "far", 120, true), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_NEAR", "near", 5, true), None, "manual").unwrap();
+        store.add_codearts_account(&credential("AK_BARE", "bare", 5, false), None, "manual").unwrap();
         let id_of = |user: &str| {
             store
                 .list_accounts()["accounts"]
@@ -785,8 +902,8 @@ mod store_hooks {
     #[tokio::test]
     async fn force_refresh_is_the_override_not_the_default_no_op() {
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
-        let id = store.codearts_account_record(Region::Cn, "").expect("账号应当可读")["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(&credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
+        let id = store.codearts_account_record("").expect("账号应当可读")["id"].as_str().unwrap().to_string();
 
         // 非强制那条：没临期就原样返回，**不发网络请求**（临时库里是假串，真刷必炸）
         let token = CODEARTS_ADAPTER.ensure_access_token(&store, &id).await.expect("未临期应当直接用盘上这份");
@@ -899,8 +1016,8 @@ mod store_hooks {
         let catalog = local_catalog();
 
         let store = store();
-        store.add_codearts_account(Region::Cn, &credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
-        let id = store.codearts_account_record(Region::Cn, "").expect("账号应当可读")["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(&credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
+        let id = store.codearts_account_record("").expect("账号应当可读")["id"].as_str().unwrap().to_string();
 
         // 与 provider_loop 会话式分支同一动作：按整组名单逐个记账，恢复时刻也走
         // 同一判据（认得出日池 ⇒ 下一个北京零点，见 `daily_pool_reset_at`）。
@@ -922,7 +1039,7 @@ mod store_hooks {
         }
 
         let now = crate::server::logging::now_ms();
-        let limits = store.codearts_account_record(Region::Cn, "").unwrap()["rateLimits"].clone();
+        let limits = store.codearts_account_record("").unwrap()["rateLimits"].clone();
         let limits = limits.as_object().expect("rateLimits 应当是对象");
         // 别的福利模型名（本次没撞的那个）也必须有自己的冷却记录，且恢复时刻
         // 是日池重置点而不是 10 分钟兜底

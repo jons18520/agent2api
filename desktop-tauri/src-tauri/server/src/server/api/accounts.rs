@@ -60,7 +60,7 @@ use crate::server::core::providers::adapter::adapter_for;
 use crate::server::core::providers::zcode;
 use crate::server::core::providers::ProviderKind;
 use crate::server::errors::management_error;
-use crate::server::http::{ok_json, parse_body};
+use crate::server::http::{ok_json, parse_body, query_param};
 use crate::server::logging;
 use crate::server::ServerState;
 
@@ -310,11 +310,14 @@ pub async fn dispatch(
 
     // ③' GET + /onboarding 结尾 → 新手任务状态（只读，签到后弹窗的查询口）。
     // 与上面 POST 段同一写法：后缀互不包含，先后不影响命中。
+    // `?refresh=1` 强制实查上游（手点「查询任务」）；不带则吃结算记忆（一次性
+    // 福利领完就不再问上游，见 `api::onboarding` 的模块说明）。
     if method == Method::GET {
         if let Some(id) = rest.strip_suffix("/onboarding") {
             let id = decode_segment(id);
             if !id.is_empty() {
-                return super::onboarding::status(&state, &id).await;
+                let refresh = query_param(query, "refresh").as_deref() == Some("1");
+                return super::onboarding::status(&state, &id, refresh).await;
             }
         }
     }
@@ -435,26 +438,26 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 store.add_autoclaw_account(region, &payload, import_name)
             }
         }
-        // CodeArts（两个区域）：粘贴凭证（AK/SK/STS + domain/user + 可选的
-        // refresh token 与 oauth_context）。**不调上游**——凭据是登录换来的，
-        // 添加时没有可交换的授权码；目录与连通性由刷新链路验。
-        //
-        // 两个区域走**同一份实现**、按区域参数化（`codearts::region`）：账号集合
-        // 按 provider 隔离，因此这里的 kind → region 必须逐字对应，不能让国际版
-        // 落进国内版的记录里（那会让两家的账号在同一分组里混着，选路也按错误的
-        // 区域网关发请求 —— 而凭据是**区域签发**的，跨区域必然 401）。
-        Some(kind @ (crate::server::core::providers::ProviderKind::CodeArts
-            | crate::server::core::providers::ProviderKind::CodeArtsIntl)) => {
-            let region = crate::server::core::providers::codearts::region::Region::from_kind(kind)
-                .unwrap_or(crate::server::core::providers::codearts::region::Region::Cn);
+        // CodeArts：粘贴凭证（AK/SK/STS + domain/user + 可选的 refresh token 与
+        // oauth_context）。**不调上游**——凭据是登录换来的，添加时没有可交换的
+        // 授权码；目录与连通性由刷新链路验。
+        // 网页登录（要 DPoP + PKCE 回调）在 M5 后续切片，届时这里加一条分支。
+        Some(crate::server::core::providers::ProviderKind::CodeArts) => {
             match crate::server::core::providers::codearts::credentials::Credential::from_payload(&payload) {
-                Ok(credential) => store.add_codearts_account(region, &credential, import_name, "manual"),
+                Ok(credential) => store.add_codearts_account(&credential, import_name, "manual"),
                 Err(reason) => Err(AccountStoreError::new(reason, 400)),
             }
         }
-        Some(crate::server::core::providers::ProviderKind::Qoder) => {
-            match crate::server::core::providers::qoder::auth::prepare_account(&payload).await {
-                Ok(credentials) => store.add_qoder_account(&credentials, import_name, "manual"),
+        // Qoder（两个地区走同一份实现、按地区参数化，与 AutoClaw 同款）：
+        // 粘贴 PAT / 凭证 → 手动添加。拆家后界面上是两张卡片（`qoder` /
+        // `qoder-intl`），地区由 kind 反查（provider 身份是权威，payload 里
+        // 的 `mode` 只是兼容字段）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::Qoder
+            | crate::server::core::providers::ProviderKind::QoderIntl)) => {
+            let region = crate::server::core::providers::qoder::endpoints::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::qoder::endpoints::Region::Cn);
+            match crate::server::core::providers::qoder::auth::prepare_account(&payload, region).await {
+                Ok(credentials) => store.add_qoder_account(region, &credentials, import_name, "manual"),
                 Err(error) => Err(AccountStoreError::new(error.message, error.status_code)),
             }
         }
@@ -856,17 +859,23 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
             "自定义提供商账号的凭证由用户直接提供，无需刷新（更换凭证请重新添加或直接编辑）",
         );
     }
-    if state.store().qoder_account_record(&id).is_some() {
-        return refresh_provider_account(state, &id, ProviderKind::Qoder).await;
+    // Qoder（两个地区各查一次 —— 账号集合按 provider 隔离，同一 id 不可能
+    // 同时属于两家，与 Accio / AutoClaw 同一条遍历）
+    for region in crate::server::core::providers::qoder::endpoints::Region::ALL {
+        if state
+            .store()
+            .qoder_account_record(region, &id)
+            .is_some()
+        {
+            return refresh_provider_account(state, &id, region.kind()).await;
+        }
     }
-    // CodeArts（两个区域）：一次性 refresh token + 写回，必须走适配器。
+    // CodeArts：一次性 refresh token + 写回，必须走适配器。
     // **这条不能省**：漏了就会落到下面的 workbuddy 兜底链路，用户得到一条与
     // 本家毫无关系的错误（沙箱端到端实测抓到的原文是
     // `auth/token/refresh 失败: client key [] not found`）。
-    // 区域由记录自己回答（`codearts_region_of`）—— 账号集合按 provider 隔离，
-    // 同一 id 不可能同时属于两个区域（撞 id 在存储层就报错了）。
-    if let Some(region) = state.store().codearts_region_of(&id) {
-        return refresh_provider_account(state, &id, region.kind()).await;
+    if state.store().codearts_account_record(&id).is_some() {
+        return refresh_provider_account(state, &id, ProviderKind::CodeArts).await;
     }
     // Trae：一次性 refreshToken + 每次换发都轮换，必须走它自己的适配器
     // （`ExchangeToken`）。**这条也不能省**：漏了就落到下面的 workbuddy 兜底，

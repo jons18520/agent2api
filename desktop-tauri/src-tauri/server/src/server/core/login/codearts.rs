@@ -131,7 +131,7 @@ impl LoginService {
                     // 成功才取走：授权码与 verifier 都是一次性的，留着只会被再试一次
                     oauth::take_pending(&candidate.ticket_id);
                     let handle = self.tasks.get(&candidate.ticket_id);
-                    mark_done(handle.as_ref(), &account_id, candidate.region);
+                    mark_done(handle.as_ref(), &account_id);
                     return Callback::Accepted(Some(account_id), "登录成功，账号已加入列表，可以关闭此页面。".to_string());
                 }
                 Err(error) => {
@@ -176,7 +176,7 @@ impl LoginService {
                     return;
                 }
                 match oauth::poll_ticket(
-                    &pending.region.base_url(),
+                    crate::server::core::providers::codearts::models::DEFAULT_BASE_URL,
                     &pending,
                     None,
                 ).await {
@@ -186,14 +186,14 @@ impl LoginService {
                         // PKCE 与 DPoP 补进去：虽然上游没给 refresh token 因而续不了，
                         // 但上下文与凭据同源，留着它至少不会让「凭据形状」看起来缺半块
                         credential.oauth_context = Some(pending.context.clone());
-                        match store.add_codearts_account(pending.region, &credential, None, "web-login") {
+                        match store.add_codearts_account(&credential, None, "web-login") {
                             Ok(public) => {
                                 let id = public.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
                                 logging::log(
                                     "[Login]",
                                     "CodeArts 经 ticket 通道落账（该通道不带 refresh token，约一小时后需重新登录）",
                                 );
-                                mark_done(Some(&handle), &id, pending.region);
+                                mark_done(Some(&handle), &id);
                                 return;
                             }
                             Err(error) => {
@@ -226,19 +226,19 @@ impl LoginService {
 async fn exchange_and_store(store: &AccountStore, pending: &oauth::PendingLogin, code: &str) -> Result<String, GatewayError> {
     let credential = oauth::exchange_for(pending, code, None).await?;
     let public = store
-        .add_codearts_account(pending.region, &credential, None, "web-login")
+        .add_codearts_account(&credential, None, "web-login")
         .map_err(|error| GatewayError::with_status(error.status_code, error.message))?;
     Ok(public.get("id").and_then(Value::as_str).unwrap_or_default().to_string())
 }
 
 /// 把任务句柄标成完成（界面的 `/wait` 靠它收尾）。
-fn mark_done(handle: Option<&LoginTaskHandle>, account_id: &str, region: crate::server::core::providers::codearts::region::Region) {
+fn mark_done(handle: Option<&LoginTaskHandle>, account_id: &str) {
     let Some(handle) = handle else { return };
     handle.update(|task| {
         task.done = true;
         task.session = Some(json!({
             "accountUid": account_id,
-            "provider": region.provider_id(),
+            "provider": crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID,
         }));
         task.finished_at = Some(logging::now_ms());
     });
@@ -278,7 +278,6 @@ mod tests {
     use crate::server::core::account_store::AccountStore;
     use crate::server::core::auth::AuthService;
     use crate::server::core::providers::codearts::oauth;
-    use crate::server::core::providers::codearts::region::Region;
     use crate::server::db::Db;
 
     use super::*;
@@ -303,7 +302,7 @@ mod tests {
     /// 发起一轮登录并返回它的 ticket（= 任务 state）。
     fn begin() -> String {
         oauth::set_loopback_port(13_999);
-        let (_url, pending) = oauth::begin_login(Region::Cn, "snap_vscode", "26.9.101", "en-us").expect("端口已设，应当能发起");
+        let (_url, pending) = oauth::begin_login("snap_vscode", "26.9.101", "en-us").expect("端口已设，应当能发起");
         pending.ticket_id
     }
 
@@ -393,7 +392,6 @@ mod tests {
         // 而 5xx / 解析失败才该立刻报给用户
         let (base, _hits) = mock_ticket_server(404, r#"{"error":"not ready"}"#).await;
         let pending = oauth::PendingLogin {
-            region: Region::Cn,
             ticket_id: "t".to_string(),
             context: Default::default(),
             callback_url: "http://127.0.0.1:13999/oauth/callback".to_string(),

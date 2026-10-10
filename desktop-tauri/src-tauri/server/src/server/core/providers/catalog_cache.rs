@@ -86,10 +86,8 @@ pub const SCOPE_CLINE: &str = "cline";
 pub const SCOPE_ACCIO_GLOBAL: &str = "accioGlobal";
 /// Accio 国内版
 pub const SCOPE_ACCIO_CN: &str = "accioCn";
-/// CodeArts 国内版（华为云 snap-access；三源合并成一份清单，所以一个 scope）
+/// CodeArts（华为云 snap-access；三源合并成一份清单，所以一个 scope）
 pub const SCOPE_CODEARTS: &str = "codearts";
-/// CodeArts 国际版（另一个区域网关，另一份清单，见 `codearts::region`）
-pub const SCOPE_CODEARTS_INTL: &str = "codeartsIntl";
 /// Trae SOLO（`/api/ide/v1/get_detail_param`）
 pub const SCOPE_TRAE: &str = "trae";
 /// Loomy（讯飞；`GET {集成网关}/api/v1/models`，OpenAI 格式目录）
@@ -109,7 +107,6 @@ pub const ALL_SCOPES: &[&str] = &[
     SCOPE_ACCIO_GLOBAL,
     SCOPE_ACCIO_CN,
     SCOPE_CODEARTS,
-    SCOPE_CODEARTS_INTL,
     SCOPE_TRAE,
     SCOPE_LOOMY,
 ];

@@ -167,9 +167,7 @@ pub fn shim_js() -> &'static str {
   function needsManualCallback(provider) {
     return provider === 'trae'
       || provider === 'accio' || provider === 'accio-cn'
-      // CodeArts 两个区域（`codearts` / `codearts-intl`）的授权页都会把浏览器
-      // 导航到 loopback 地址，远程面板收不到回调，都要走粘贴兜底
-      || provider.indexOf('codearts') === 0 || provider === 'autoclaw-intl';
+      || provider === 'codearts' || provider === 'autoclaw-intl';
   }
 
   function escapeHtml(value) {
@@ -201,7 +199,7 @@ pub fn shim_js() -> &'static str {
     var label = provider === 'raccoon' ? '小浣熊'
       : provider === 'trae' ? 'Trae'
       : provider.indexOf('accio') === 0 ? 'Accio'
-      : provider.indexOf('codearts') === 0 ? 'CodeArts' : 'AutoClaw';
+      : provider === 'codearts' ? 'CodeArts' : 'AutoClaw';
     var callbackInstruction = '授权完成后，复制授权页浏览器地址栏中的<strong>完整地址</strong>，'
         + '粘贴到下面提交。不要复制授权页原始地址，也不要改动参数。';
     while (true) {
@@ -764,8 +762,11 @@ pub fn shim_js() -> &'static str {
     // ── Loomy 新手任务（查询 / 一键领取）──
     // 与桌面 `bridge.rs` 的同名方法成对维护：签到后界面查询任务状态、有未领取才
     // 弹窗领取（accounts-dialog-onboarding）。
-    getOnboardingTasks: function (id) {
-      return call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding');
+    // `refresh` = 界面手点「查询任务」→ `?refresh=1` 强制实查上游；不带则吃后端
+    // 的结算记忆（一次性福利领完就不再问上游，见 api::onboarding 的模块说明）。
+    getOnboardingTasks: function (id, refresh) {
+      return call('GET', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding'
+        + (refresh ? '?refresh=1' : ''));
     },
     claimOnboardingTasks: function (id) {
       return call('POST', '/api/accounts/' + encodeURIComponent(String(id || '')) + '/onboarding/claim', {});
