@@ -182,7 +182,7 @@ pub async fn get_tasks(
         // `all_settled`（每一条都已到账）而不是 `unclaimed == 0` —— 后者会把
         // `blocked` 的行误当成结清，见那里的说明。
         "settled": all_settled(&rows),
-    }), provider));
+    }), provider);
     // 走到这里清单必然非空（空清单且无记忆 = 这账号压根没有新人礼，不该落记忆
     // —— 那会让它此后永远不再实查；空清单但有记忆已在上面的回落里消化掉了）。
     // `remember` 自己按 settled 决定写还是清，并把结算时刻补回响应（与记忆路径
@@ -273,7 +273,7 @@ pub async fn claim_all(store: &AccountStore, account_id: &str) -> Result<Value, 
         "unclaimed": unclaimed_of(&rows),
         "settled": all_settled(&rows),
         "outcome": run.outcome.label(),
-    }), provider));
+    }), provider);
     // 本轮确实有这一条活动 ⇒ 顺手同步记忆（判据与 `get_tasks` 同一把：非空才
     // 记，`remember` 自己按 settled 决定写还是清）。`previous` 传 None 是确定的：
     // 上面已有记忆就短路返回了，走到这里必然还没有快照，结算时刻按现在计。
