@@ -299,10 +299,12 @@ pub enum ProviderKind {
     /// ── 与 [`ProviderKind::CodeArtsIntl`] 是同一套协议的两个区域 ────
     /// 两地共用同一份实现（`codearts::CodeArtsAdapter` 持有一个
     /// `codearts::region::Region`），差别只在**区域端点**：国内 `cn-north-4`
-    /// （`snap-access.cn-north-4.myhuaweicloud.com` / `sts.cn-north-4...` /
-    /// 门户 `codearts.huaweicloud.com`），国际 `ap-southeast-1`
-    /// （`snap-access.ap-southeast-1...` / `sts.ap-southeast-1...` /
+    /// （`snap-access.cn-north-4.myhuaweicloud.com` / 门户 `codearts.huaweicloud.com`），
+    /// 国际 `ap-southeast-1`（`snap-access.ap-southeast-1...` /
     /// 门户 `codearts.ap-southeast-1.huaweicloud.com`）。
+    /// **授权面（STS 令牌 / 身份端点）两地同一台** `sts.cn-north-4.myhuaweicloud.com`
+    /// —— 官方扩展 `product.json` 的 `HKFramework.iamStsOpenDomain` 不分区，
+    /// 国际区域的 `sts.<region>` 上该 API 会回 `STS5.1007`（见 `region` 的模块头）。
     ///
     /// ── provider id 为什么只有国际版是新 id ──────────────────────
     /// 国内版保持 `"codearts"` 不动：它是存量账号的落盘契约（改名会让账号

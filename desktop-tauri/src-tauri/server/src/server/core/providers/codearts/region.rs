@@ -3,27 +3,35 @@
 //! ── 这一家是什么 ────────────────────────────────────────────
 //! CodeArts（华为云 AI 代码助手 / CodeArts Doer / snap-access）的官方扩展打的
 //! 是**区域网关** `https://snap-access.<region>.myhuaweicloud.com`（参考实现
-//! `cpa-codearts-plugin` 的 `base_url` 注释原文），STS 令牌端点同理
-//! （`https://sts.<region>.myhuaweicloud.com/v1/oauth2/tokens`），网页登录门户
-//! 则是 CodeArts 自己的控制台域名。**区域决定了凭据的签发地**：国内 `cn-north-4`
+//! `cpa-codearts-plugin` 的 `base_url` 注释原文），网页登录门户则是 CodeArts
+//! 自己的控制台域名。**数据面（snap-access）与门户按区域分区**：国内 `cn-north-4`
 //! 签发的 AK/SK/STS 拿到国际站上必然 401，反之亦然 —— 所以区域不是「一个可选
 //! 参数」，而是身份的一部分。
 //!
+//! 但**授权面（STS 令牌 / 身份端点）不分区**：官方扩展 `product.json` 里，
+//! 国际版（`HKFramework.productDomain`）的 `iamStsOpenDomain` 仍是
+//! `https://sts.cn-north-4.myhuaweicloud.com` —— 与国内版逐字相同。因此两地的
+//! `token_url()` / `identity_url()` 是**同一个**端点，只有 `base_url()` /
+//! `web_login_base()` 分区域。
+//!
 //! ```text
-//!              区域网关（snap-access）                          STS（sts）                          网页登录门户
+//!              区域网关（snap-access）                              STS（sts，两地同一台）                      网页登录门户
 //!   国内版  https://snap-access.cn-north-4.myhuaweicloud.com   https://sts.cn-north-4.myhuaweicloud.com   https://codearts.huaweicloud.com
-//!   国际版  https://snap-access.ap-southeast-1.myhuaweicloud.com  https://sts.ap-southeast-1.myhuaweicloud.com  https://codearts.ap-southeast-1.huaweicloud.com
+//!   国际版  https://snap-access.ap-southeast-1.myhuaweicloud.com  https://sts.cn-north-4.myhuaweicloud.com   https://codearts.ap-southeast-1.huaweicloud.com
 //! ```
 //!
-//! ── 国际版为什么是 `ap-southeast-1`（依据）────────────────────
-//! 华为云国际站的产品页与价格文档写明 CodeArts **仅在 AP-Singapore 区域提供**
-//! （原文 "Only available in the AP-Singapore region"，见
-//! `support.huaweicloud.com/intl/en-us/price-devcloud/codearts_29_0006.html`）。
-//! 实测（2026-10）该区域上 `snap-access.ap-southeast-1.myhuaweicloud.com/v1/model/builtin`
-//! 回 `APIG.0301` 未鉴权、`sts.ap-southeast-1.myhuaweicloud.com/v1/oauth2/tokens`
-//! 回 `APIGW.0106` 缺 DPoP，与国内 `cn-north-4` 逐字同形。
-//! 注意：区域码是 `ap-southeast-1`（不是 `ap-southeast-3`），后者 snap-access 无响应、
-//! STS 返回 `STS5.1007 this API is not supported in this region`。
+//! ── 国际版区域码是 `ap-southeast-1`（依据）────────────────────
+//! 官方扩展 `product.json` 的 `HKFramework.productDomain`：`snapApigDomain` =
+//! `https://snap-access.ap-southeast-1.myhuaweicloud.com`、`codeartsWebNewUrl` =
+//! `https://codearts.ap-southeast-1.huaweicloud.com`（实测分别回 `APIG.0301`
+//! 未鉴权、200 门户页）。**区域码不是 `ap-southeast-3`**（那个 snap-access 无响应）。
+//!
+//! ── 为什么 STS 不能跟着区域化（踩过的坑）────────────────────
+//! 曾把国际版 STS 也写成 `sts.ap-southeast-1` / `sts.ap-southeast-3`，换码必失败：
+//! 这些主机上 `/v1/oauth2/tokens` 返回
+//! `STS5.1007 this API is not supported in this region`。逐一探测 26 个区域后确认
+//! 该 API **只在 `cn-north-4` 与 `cn-south-1` 上线**，国际区域一律 1007 —— 与
+//! `product.json` 里 `iamStsOpenDomain` 不分区完全吻合。
 //!
 //! ── 福利网关国际版没有 ──────────────────────────────────────
 //! 国内版的「福利网关」（`opengw.developer.huaweicloud.com`）是**中国站**
@@ -53,7 +61,7 @@ pub enum Region {
     /// 国内版（`cn-north-4`；provider id 是 `codearts`）
     #[default]
     Cn,
-    /// 国际版（`ap-southeast-1`，AP-Singapore；provider id 是 `codearts-intl`）
+    /// 国际版（数据面 `ap-southeast-1`，AP-Singapore；provider id 是 `codearts-intl`）
     Intl,
 }
 
@@ -114,10 +122,15 @@ impl Region {
     }
 
     /// 本区域 STS 的**默认**基址（不含尾斜杠；令牌与身份端点都挂在它下面）。
+    ///
+    /// 两地是**同一台**：官方扩展 `product.json` 的 `HKFramework` 里
+    /// `iamStsOpenDomain` 仍是 `sts.cn-north-4`（授权面不分区，见模块头）。
+    /// 别把国际版改成 `sts.ap-southeast-*` —— 那些主机上 `/v1/oauth2/tokens`
+    /// 回 `STS5.1007 本区域不支持该 API`，登录换码会整个失败。
     pub const fn default_sts_base(self) -> &'static str {
         match self {
             Self::Cn => "https://sts.cn-north-4.myhuaweicloud.com",
-            Self::Intl => "https://sts.ap-southeast-1.myhuaweicloud.com",
+            Self::Intl => "https://sts.cn-north-4.myhuaweicloud.com",
         }
     }
 
@@ -250,15 +263,18 @@ mod tests {
     fn the_two_regions_point_at_different_gateways() {
         let cn = Region::Cn;
         let intl = Region::Intl;
-        // 区域网关与 STS 必须两地不同（凭据是区域签发的，跨区域必然 401）
+        // 数据面（区域网关与门户）两地必须不同（凭据是区域签发的，跨区域必然 401）
         assert_ne!(cn.default_base_url(), intl.default_base_url());
-        assert_ne!(cn.default_sts_base(), intl.default_sts_base());
         assert_ne!(cn.default_web_login_base(), intl.default_web_login_base());
-        // 国际版落在 AP-Singapore（`ap-southeast-1`），国内版落在 cn-north-4
+        // 但**授权面是同一台**：STS 令牌 / 身份端点两地共用 cn-north-4
+        // （官方扩展 product.json 的 HKFramework.iamStsOpenDomain，见模块头）
+        assert_eq!(cn.default_sts_base(), intl.default_sts_base());
+        // 国际版的数据面落在 AP-Singapore（`ap-southeast-1`），国内版落在 cn-north-4
         assert!(cn.default_base_url().contains("cn-north-4"));
         assert!(intl.default_base_url().contains("ap-southeast-1"));
-        assert!(intl.default_sts_base().contains("ap-southeast-1"));
-        // 令牌 / 身份端点挂在各自的 STS 基址下
+        assert!(intl.default_web_login_base().contains("ap-southeast-1"));
+        // 两地的令牌 / 身份端点都挂在 cn-north-4 STS 下（不能是区域化的 sts）
+        assert!(intl.token_url().contains("sts.cn-north-4"));
         assert!(cn.token_url().starts_with(cn.default_sts_base()));
         assert!(intl.identity_url().starts_with(intl.default_sts_base()));
         assert!(cn.token_url().ends_with("/v1/oauth2/tokens"));

@@ -36,8 +36,8 @@ use super::region::Region;
 
 /// 与官方扩展一致的固定 client_id。
 pub const CLIENT_ID: &str = "vscode-codebot";
-/// 令牌端点与身份端点（**国内版默认值**；真正的取值按区域走
-/// [`Region::token_url`] / [`Region::identity_url`]，国际版是 `sts.ap-southeast-1`）。
+/// 令牌端点与身份端点（**两地共用**，授权面不分区；真正的取值走
+/// [`Region::token_url`] / [`Region::identity_url`]，两地的 STS 基址都是 `sts.cn-north-4`）。
 /// 这两个常量保留是为了兼容既有引用（`--ignored` 的上游阶梯测试在用），
 /// 新代码请按区域取。
 pub const TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
@@ -136,7 +136,7 @@ async fn token_request(
     previous_refresh_token: &str,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
-    // 令牌端点按区域取（国际版是 `sts.ap-southeast-1`，见 `region` 的模块头）
+    // 令牌端点按区域取（两地都是 `sts.cn-north-4`，授权面不分区，见 `region` 的模块头）
     let token_url = region.token_url();
     let key = DpopKey::from_key_pair(&context.dpop_key_pair)
         .map_err(|reason| GatewayError::with_status(400, reason))?;
