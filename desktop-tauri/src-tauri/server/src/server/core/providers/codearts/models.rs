@@ -240,13 +240,18 @@ pub fn parse_agent_ids(body: &str) -> Result<Vec<String>, String> {
 /// 解析 `/v1/benefit-gateway-config` 的总开关。
 ///
 /// 返回 `Ok(false)` 表示"这个部署没有福利网关"，不是错误。
+///
+/// ── 只有显式 `enabled:false` 才算关闭（国际版形状不同，2026-10 实测）──
+/// 国内版回 `{"enabled":true,...}`；**国际版同一路径回的是 `{"vendors":[...]}`**
+/// —— 第三方模型目录（MaaS Global/CN、DeepSeek、OpenAI、Gemini、智谱、MiniMax 的
+/// `base_url` + `api_key_url` + 模型表），顶层根本没有 `enabled`。官方扩展判断福利
+/// 是否可用用的是 `if (config)`（拿到非空配置即视为启用），所以这里缺 `enabled`
+/// 字段时按**启用**处理：真取不到福利目录会在下一步（`/api/v1/gateway/config`）
+/// 如实报错，不会静默成"这个区域没福利"。
 pub fn parse_benefit_gate(body: &str) -> Result<bool, String> {
     let payload: Value =
         serde_json::from_str(body).map_err(|error| format!("福利开关不是合法 JSON：{error}"))?;
-    payload
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "福利开关响应没有 enabled 字段".to_string())
+    Ok(payload.get("enabled").and_then(Value::as_bool).unwrap_or(true))
 }
 
 /// 解析福利网关的 `result.models`。
@@ -562,6 +567,9 @@ async fn fetch_benefit(
         true,
     )
     .await?;
+    // 目录响应也先给形状：国内是 `{error_code,result:{models}}`；若国际版这里回的是
+    // 别的形状（例如又是 `{vendors}`），一行就能看出来，不必翻全文。
+    crate::server::logging::log("[CodeArts]", &format!("  福利目录响应形状：{}", describe_shape(&body)));
     log_raw("福利网关 gateway/config", &body);
     parse_benefit(&body).map(Some)
 }
@@ -1091,7 +1099,10 @@ mod tests {
     fn benefit_gate_reports_absence_without_erroring() {
         assert!(parse_benefit_gate(BENEFIT_GATE).unwrap(), "实测这个部署开着福利网关");
         assert!(!parse_benefit_gate(r#"{"enabled":false}"#).unwrap());
-        assert!(parse_benefit_gate(r#"{}"#).is_err(), "没有 enabled 字段是错误");
+        // 国际版同一路径回的是 `{"vendors":[...]}`（第三方模型目录），顶层没有 enabled
+        // —— 按官方扩展 `if (config)` 的口径视为启用，而不是判错（2026-10 实测）。
+        assert!(parse_benefit_gate(r#"{"vendors":[]}"#).unwrap(), "缺 enabled 字段时按启用处理");
+        assert!(parse_benefit_gate("not json").is_err(), "不是 JSON 仍然报错");
     }
 
     /// 三源合并：先 agent、再 builtin、最后 benefit，按 id 先到先得。
