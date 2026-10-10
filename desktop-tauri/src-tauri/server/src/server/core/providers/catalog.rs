@@ -96,10 +96,16 @@ pub(crate) fn refresh_meta(kind: ProviderKind) -> (bool, i64) {
                 super::qoder::models::last_refreshed_at(region),
             )
         }
-        ProviderKind::CodeArts => (
-            super::codearts::models::remote_refreshed(),
-            super::codearts::models::last_refreshed_at(),
-        ),
+        // CodeArts 两个区域各有自己的目录缓存（两台区域网关、两份清单）：
+        // 两家任一刷过就算「有远程来源」，时间取该区域那次拉取
+        ProviderKind::CodeArts | ProviderKind::CodeArtsIntl => {
+            let region = super::codearts::region::Region::from_kind(kind)
+                .unwrap_or(super::codearts::region::Region::Cn);
+            (
+                super::codearts::models::remote_refreshed(region),
+                super::codearts::models::last_refreshed_at(region),
+            )
+        }
         ProviderKind::CatPaw => (
             !super::catpaw::catalog::remote_models().is_empty(),
             super::catpaw::catalog::last_refreshed_at(),

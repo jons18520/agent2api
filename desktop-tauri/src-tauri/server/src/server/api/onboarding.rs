@@ -63,6 +63,9 @@ const RACCOON_PROVIDER_ID: &str = "raccoon";
 /// 常量与本家共用一处，免得界面认的 id 和存储写的 id 分叉。
 const CODEARTS_PROVIDER_ID: &str =
     crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID;
+/// CodeArts 国际版的同一分派键（两个区域各占一个 provider id，都要落这条执行体）。
+const CODEARTS_INTL_PROVIDER_ID: &str =
+    crate::server::core::account_store::codearts_accounts::CODEARTS_INTL_PROVIDER_ID;
 
 /// 从账号存储里查一条账号的 provider id（查不到账号给空串 —— 分派会落到
 /// Loomy 分支，由 `loomy_account_record` 报 404，与既有兜底行为一致）。
@@ -93,8 +96,8 @@ pub fn settled_view(store: &AccountStore, account_id: &str, provider: &str) -> O
         RACCOON_PROVIDER_ID => {
             raccoon_onboarding::settled_view(store.raccoon_account_record(account_id).as_ref())
         }
-        CODEARTS_PROVIDER_ID => {
-            codearts_onboarding::settled_view(store.codearts_account_record(account_id).as_ref())
+        CODEARTS_PROVIDER_ID | CODEARTS_INTL_PROVIDER_ID => {
+            codearts_onboarding::settled_view(store.codearts_account_record_any(account_id).as_ref())
         }
         _ => loomy_onboarding::settled_view(store.loomy_account_record(account_id).as_ref()),
     }
@@ -109,7 +112,7 @@ pub async fn status(state: &ServerState, account_id: &str, refresh: bool) -> Res
         RACCOON_PROVIDER_ID => {
             raccoon_onboarding::get_tasks(state.store(), account_id, refresh).await
         }
-        CODEARTS_PROVIDER_ID => {
+        CODEARTS_PROVIDER_ID | CODEARTS_INTL_PROVIDER_ID => {
             codearts_onboarding::get_tasks(state.store(), account_id, refresh).await
         }
         _ => loomy_onboarding::get_tasks(state.store(), account_id, refresh).await,
@@ -125,7 +128,9 @@ pub async fn status(state: &ServerState, account_id: &str, refresh: bool) -> Res
 pub async fn claim(state: &ServerState, account_id: &str) -> Response {
     let result = match provider_of_account(state, account_id).as_str() {
         RACCOON_PROVIDER_ID => raccoon_onboarding::claim_all(state.store(), account_id).await,
-        CODEARTS_PROVIDER_ID => codearts_onboarding::claim_all(state.store(), account_id).await,
+        CODEARTS_PROVIDER_ID | CODEARTS_INTL_PROVIDER_ID => {
+            codearts_onboarding::claim_all(state.store(), account_id).await
+        }
         _ => loomy_onboarding::claim_all(state.store(), account_id).await,
     };
     match result {

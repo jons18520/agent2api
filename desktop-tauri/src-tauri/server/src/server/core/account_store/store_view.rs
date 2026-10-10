@@ -251,7 +251,10 @@ impl AccountStore {
             // 两个地区（`qoder` / `qoder-intl`）共用这一份公开形态：地区由
             // provider id（兜底 `mode` 字段）派生进 `edition` / `editionLabel`
             self.to_qoder_public_account(record)
-        } else if record.provider() == super::codearts_accounts::CODEARTS_PROVIDER_ID {
+        } else if super::is_codearts_family(&record.provider()) {
+            // 两个区域（`codearts` / `codearts-intl`）共用这一份公开形态：
+            // 账号字段、续期语义两地完全一致，差别只在区域端点与 STS 签发地
+            // （那是转发与凭据层的事，公开形态只用 `edition` 把区域标出来供界面显示）
             self.to_codearts_public_account(record)
         } else if super::is_cline_family(&record.provider()) {
             // 两个池（`cline-free` / `cline-pass`）共用这一份公开形态

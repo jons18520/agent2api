@@ -174,11 +174,13 @@ pub(super) fn identity_of_item(provider: &str, item: &Map<String, Value>) -> Res
         }
         return Err("缺少 account（无法标识 Cline 账号）".to_string());
     }
-    // CodeArts：`domain_id + user_id` 两段身份 —— 与 `codearts_accounts::same_identity`
-    // 的判重口径逐字一致。只按 userId 会把**同一个人不同华为云账号（域）下的两条**
-    // 并成一条：导入时后一条覆盖前一条，而被覆盖那条的一次性 refresh token
-    // 就此作废（不是"少一条记录"，是"烧掉一份登录凭据"）。
-    if provider == kind_id(ProviderKind::CodeArts) {
+    // CodeArts（两个区域）：`domain_id + user_id` 两段身份 —— 与
+    // `codearts_accounts::same_identity` 的判重口径逐字一致。只按 userId 会把
+    // **同一个人不同华为云账号（域）下的两条**并成一条：导入时后一条覆盖前一条，
+    // 而被覆盖那条的一次性 refresh token 就此作废（不是"少一条记录"，是"烧掉一份
+    // 登录凭据"）。两个区域各占一个 provider id（作用域由调用方的二元组给出），
+    // 所以这里的身份串不必再带区域。
+    if crate::server::core::account_store::is_codearts_family(provider) {
         let user_id = text("userId");
         if user_id.is_empty() {
             return Err("缺少 userId（无法标识 CodeArts 账号）".to_string());

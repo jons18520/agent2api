@@ -200,21 +200,28 @@ pub async fn get_center(State(state): State<ServerState>) -> Response {
     // `auto_checkin` 的提供商清单里（那是后端的定时任务），签到中心「签到后自动
     // 补领」会替用户领这一条一次性新人礼 —— 领过之后上游不再回 claimable，
     // 而结算记忆一落，这条自动路径连查询都不再发（见 codearts::onboarding）。
+    // 两个区域各占一个 provider id（`codearts` / `codearts-intl`），都要收，
+    // 否则国际版账号的这条新人礼在签到中心里看不到。
     let mut onboarding_rows = onboarding_rows_of("loomy");
     onboarding_rows.extend(onboarding_rows_of("raccoon"));
     onboarding_rows.extend(onboarding_rows_of("codearts"));
+    onboarding_rows.extend(onboarding_rows_of("codearts-intl"));
     // CodeArts 的福利行带**本地领取台账**（`account.welfare`）—— 与下面 ZCode 行
     // 带 `claimPlans` 同一个先例：台账是后端落盘的本地事实（day / accepted /
     // confirmed），带出来零上游请求，不违反「快照零上游」；界面的「已领取」
     // 标记按它判（北京时间的日界判定在前端 `welfareStateOf`，不在后端再抄一份）。
+    // 两个区域都收（见上）。
     let welfare_rows: Vec<Value> = accounts
         .iter()
-        .filter(|account| account_text(account, "provider") == "codearts")
+        .filter(|account| {
+            let provider = account_text(account, "provider");
+            provider == "codearts" || provider == "codearts-intl"
+        })
         .map(|account| {
             json!({
                 "id": account_text(account, "id"),
                 "name": Value::from(account_text(account, "name")),
-                "provider": "codearts",
+                "provider": account_text(account, "provider"),
                 "welfare": account.get("welfare").cloned().unwrap_or(Value::Null),
             })
         })

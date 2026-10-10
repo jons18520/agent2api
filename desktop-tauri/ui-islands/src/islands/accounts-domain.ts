@@ -134,10 +134,19 @@ const PROVIDER_FEATURES: Record<string, ProviderFeatures> = {
   // 「领福利」不在能力表里：入口已整体迁到「签到中心」（api::checkin_center 按
   //   provider 组装福利行，ui/codearts-welfare.js 的流程两边共用），账号页不再有
   //   这颗按钮 —— 判据只留后端一处，界面不再查表。
-  // `edition: false` —— 没有版本/地区概念：region 固定在 cn-north-4 且必须与 token
-  //   签发地一致，不是用户可选项；`login_type`（WEB/IDE）也不是版本，别塞进这一列。
+  // `edition: false` —— 两个区域是两个 provider、区域写在**提供商名**里
+  //   （「CodeArts 国内版」/「CodeArts 国际版」），账号本身不再带地区列
+  //   （与 AutoClaw 两个地区同款；`login_type`（WEB/IDE）不是版本，别塞进这一列）。
   // `expiry: 'expiresAt'` —— 临时凭据约一小时到期，这一列对本家**是主要信息**。
   codearts: {
+    usage: true, usageDetail: true, edition: false,
+    identifier: 'userId', expiry: 'expiresAt',
+    concurrencyDefault: 3,
+  },
+  // CodeArts 国际版（AP-Singapore）：能力与国内版逐字相同，差别只在区域网关与
+  // STS 签发地。**必须单独登记** —— 漏了它会掉进 GENERIC_FEATURES（症状：余额列
+  // 与 usageDetail 明细弹层消失、标识列空）。
+  'codearts-intl': {
     usage: true, usageDetail: true, edition: false,
     identifier: 'userId', expiry: 'expiresAt',
     concurrencyDefault: 3,

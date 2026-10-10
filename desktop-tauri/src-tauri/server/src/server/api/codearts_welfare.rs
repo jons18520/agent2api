@@ -26,10 +26,12 @@ use crate::server::ServerState;
 /// POST 那条分派上（ZCode 的 `zcode-claim/preview` 同一形状）。
 /// 上游那一侧确实只有一次 `GET /v1/ops/delivery`。
 pub async fn preview(state: &ServerState, account_id: &str) -> Response {
-    if state.store().codearts_account_record(account_id).is_none() {
+    // 区域由记录自己回答（两个区域共用这两个端点），福利接口挂在**该区域的**
+    // 区域网关上（国际版没有福利网关，但活动接口仍在区域 API 上）。
+    let Some(region) = state.store().codearts_region_of(account_id) else {
         return management_error(404, "未找到 CodeArts 账号");
-    }
-    match welfare::preview(state.store(), account_id, welfare_base(), crate::server::logging::now_ms()).await {
+    };
+    match welfare::preview(state.store(), account_id, &region.base_url(), crate::server::logging::now_ms()).await {
         Ok(document) => ok_json(document),
         Err(error) => management_error(error.status_code, error.message),
     }
@@ -41,15 +43,15 @@ pub async fn preview(state: &ServerState, account_id: &str) -> Response {
 /// 保护的是无人值守的重试）。将来接调度时传 `auto:true` 就会走那 6 次 / 10 分钟
 /// 两道闸。
 pub async fn claim(state: &ServerState, account_id: &str, body: &Bytes) -> Response {
-    if state.store().codearts_account_record(account_id).is_none() {
+    let Some(region) = state.store().codearts_region_of(account_id) else {
         return management_error(404, "未找到 CodeArts 账号");
-    }
+    };
     let Ok(parsed) = parse_body(body) else {
         return management_error(400, "请求体不是合法 JSON");
     };
     let auto = auto_requested(&parsed);
     let now_ms = crate::server::logging::now_ms();
-    match welfare::claim_account(state.store(), account_id, welfare_base(), now_ms, !auto).await {
+    match welfare::claim_account(state.store(), account_id, &region.base_url(), now_ms, !auto).await {
         Ok(outcome) => {
             // 领完顺手把余额读回来：面板上「领到了」与「积分确实变了」是两件事，
             // 一次点击能同时回答最好。余额读失败不影响领取结果（给 null）。
@@ -76,11 +78,8 @@ fn auto_requested(body: &Value) -> bool {
     body.get("auto").and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// 活动接口挂在区域 API 上（不是福利网关），与转发/目录同一个 base。
-fn welfare_base() -> &'static str {
-    crate::server::core::providers::codearts::models::DEFAULT_BASE_URL
-}
-
+// 活动接口挂在区域 API 上（不是福利网关），与转发/目录同一个 base ——
+// 具体取哪个区域由调用方按账号记录解析（见上面两个入口）。
 #[cfg(test)]
 mod tests {
     //! 只钉一条：**限流的默认值是「手动」**。这条判据反了不会有任何测试红，

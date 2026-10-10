@@ -223,6 +223,17 @@ pub(crate) fn is_zcode_family(provider_id: &str) -> bool {
     crate::server::core::providers::zcode::region::Region::from_provider_id(provider_id).is_some()
 }
 
+/// 这个 provider 是不是 **CodeArts 系**（两个区域之一）。
+///
+/// 与 [`is_autoclaw_family`] / [`is_accio_family`] 同一形态、同一理由：
+/// 账号层有几处判断只关心「是不是 CodeArts」（公开形态、凭据写回、台账落盘、
+/// 身份字段落在 `domain_id + userId` 上），不关心哪个区域 —— 那些分支走本函数，
+/// 于是加区域或改名时只改这里一处，而不是散在各文件里的 `id == "codearts"`
+/// （那种写法对国际版恒为假，是个不会报错的静默失配）。
+pub(crate) fn is_codearts_family(provider_id: &str) -> bool {
+    crate::server::core::providers::codearts::region::Region::from_provider_id(provider_id).is_some()
+}
+
 /// 这个 provider 是不是 **Qoder 系**（`qoder` 中国版 / `qoder-intl` 国际版）。
 ///
 /// 与 [`is_accio_family`] / [`is_zcode_family`] 同一形态、同一理由：账号层有

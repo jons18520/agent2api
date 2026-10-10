@@ -447,9 +447,15 @@ pub async fn preview(store: &AccountStore, account_id: &str, base: &str, now_ms:
 }
 
 /// 读一份可用的凭据（临期就续，与转发同一入口）。
+///
+/// 区域由账号记录自己回答（`codearts_region_of`）—— 这条链的调用方（面板
+/// 预览 / 领取 / 余额回读）手上只有 account_id，没有适配器上下文。
 pub(crate) async fn current_credential(store: &AccountStore, account_id: &str) -> Result<Credential, GatewayError> {
-    let proxy = super::record_proxy(store, account_id)?;
-    super::refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await
+    let region = store
+        .codearts_region_of(account_id)
+        .ok_or_else(|| GatewayError::with_status(503, "没有可用的 CodeArts 账号：请在账号页添加并启用账号"))?;
+    let proxy = super::record_proxy(store, region, account_id)?;
+    super::refresh::ensure_fresh(store, region, account_id, false, proxy.as_ref()).await
 }
 
 /// 取台账并归一到「今天」。
@@ -666,9 +672,14 @@ pub async fn refresh_usage(store: &AccountStore, account_id: &str, now_ms: i64) 
     let Ok(credential) = current_credential(store, account_id).await else {
         return Value::Null;
     };
+    // 区域由账号记录回答：国际版没有福利网关（`None` → 空串，`fetch_both` 会
+    // 跳过那一侧，与 `query_usage` 同一口径）。
+    let Some(region) = store.codearts_region_of(account_id) else {
+        return Value::Null;
+    };
     let (statistics, benefit) = balance::fetch_both(
-        super::models::DEFAULT_BASE_URL,
-        super::models::DEFAULT_BENEFIT_GATEWAY_URL,
+        &region.base_url(),
+        region.benefit_gateway_url().as_deref().unwrap_or(""),
         &credential,
         chat::DEFAULT_LANGUAGE,
         chat::DEFAULT_PLUGIN_VERSION,
@@ -702,6 +713,7 @@ mod tests {
 
     use crate::server::core::account_store::AccountStore;
     use crate::server::core::providers::codearts::credentials::{OAuthContext, PkcePair, Credential};
+    use crate::server::core::providers::codearts::region::Region;
     use crate::server::db::Db;
 
     use super::*;
@@ -888,6 +900,7 @@ mod tests {
         let store = AccountStore::with_db(Some(Db::open(&dir.join("agent2api.db")).expect("临时库应当能建起来")));
         store
             .add_codearts_account(
+                Region::Cn,
                 &Credential {
                     access_key_id: "AK".into(),
                     secret_access_key: "SK".into(),
@@ -911,7 +924,7 @@ mod tests {
     }
 
     fn only_account_id(store: &AccountStore) -> String {
-        store.codearts_account_record("").expect("刚添加的账号要能读回")["id"].as_str().unwrap().to_string()
+        store.codearts_account_record(Region::Cn, "").expect("刚添加的账号要能读回")["id"].as_str().unwrap().to_string()
     }
 
     fn delivery_of(items: Vec<Value>) -> Value {

@@ -167,7 +167,9 @@ pub fn shim_js() -> &'static str {
   function needsManualCallback(provider) {
     return provider === 'trae'
       || provider === 'accio' || provider === 'accio-cn'
-      || provider === 'codearts' || provider === 'autoclaw-intl';
+      // CodeArts 两个区域（`codearts` / `codearts-intl`）的授权页都会把浏览器
+      // 导航到 loopback 地址，远程面板收不到回调，都要走粘贴兜底
+      || provider.indexOf('codearts') === 0 || provider === 'autoclaw-intl';
   }
 
   function escapeHtml(value) {
@@ -199,7 +201,7 @@ pub fn shim_js() -> &'static str {
     var label = provider === 'raccoon' ? '小浣熊'
       : provider === 'trae' ? 'Trae'
       : provider.indexOf('accio') === 0 ? 'Accio'
-      : provider === 'codearts' ? 'CodeArts' : 'AutoClaw';
+      : provider.indexOf('codearts') === 0 ? 'CodeArts' : 'AutoClaw';
     var callbackInstruction = '授权完成后，复制授权页浏览器地址栏中的<strong>完整地址</strong>，'
         + '粘贴到下面提交。不要复制授权页原始地址，也不要改动参数。';
     while (true) {

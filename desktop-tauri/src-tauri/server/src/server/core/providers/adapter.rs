@@ -969,7 +969,10 @@ pub fn adapter_for(kind: ProviderKind) -> &'static dyn ProviderAdapter {
         // Qoder 的两个地区是两个 provider、两个实例（同一份实现的按地区
         // 参数化，见 `qoder::endpoints::Region` 与 `qoder::mod` 的模块头）
         ProviderKind::QoderIntl => &super::qoder::QODER_INTL_ADAPTER,
+        // CodeArts 的两个区域是两个 provider、两个实例（同一份实现的按区域
+        // 参数化，见 `codearts::region` 与 `codearts::mod` 的模块头）
         ProviderKind::CodeArts => &super::codearts::CODEARTS_ADAPTER,
+        ProviderKind::CodeArtsIntl => &super::codearts::CODEARTS_INTL_ADAPTER,
         // Cline 的两个额度池是两个 provider、两个实例（同一份实现的按池
         // 参数化，见 `cline::adapter` 的模块头）
         ProviderKind::ClineFree => &super::cline::CLINE_FREE_ADAPTER,
@@ -1052,9 +1055,12 @@ pub fn implemented_kinds() -> Vec<ProviderKind> {
         // 本列表回答的是「这家接线了没有」，不是「这家的目录能不能远程刷」。
         ProviderKind::Zcode,
         ProviderKind::ZcodeIntl,
-        // CodeArts 在本列表里 = 适配器已接线（登录 / 凭据 / 目录 / 转发 / 余额
-        // / 每日福利）、可参与目录刷新调度。
+        // CodeArts 的两个区域各算一家（同一份实现、两套账号与目录缓存）。
+        // 两家都必须在列表里：国际版的目录刷新与账号维护各自独立调度，
+        // 漏了国际版就会出现「加了国际版账号、模型列表一直是空的」。
+        // 本列表 = 适配器已接线（登录 / 凭据 / 目录 / 转发 / 余额 / 每日福利）。
         ProviderKind::CodeArts,
+        ProviderKind::CodeArtsIntl,
         // Trae 已接真身（登录 / 凭据 / 目录 / 转发），并且**真有**远程目录
         // （`supports_model_refresh()` 为 true），所以它必须在本列表里 ——
         // 不在的话刷新循环根本不会问它，症状是"界面上点了刷新、日志里

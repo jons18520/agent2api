@@ -106,7 +106,9 @@ pub fn supports_checkin(account: &Value) -> bool {
     // 按钮，见 `providers::codearts::welfare`），与这条链无交集。
     // Trae 曾与 CodeArts 同列排除表；SOLO 转积分制后模型调用花的就是签到钱包
     // 那份钱，它已在 `providers::trae::checkin` 接入本链，不要再加回来。
-    if provider == crate::server::core::account_store::codearts_accounts::CODEARTS_PROVIDER_ID {
+    // 两个区域（国内版 / 国际版）都排除：判据走 family 而不是写死国内版 id，
+    // 否则国际版会漏进签到目标集合（`checkin_for` 对它报「未接入」）。
+    if crate::server::core::account_store::is_codearts_family(provider) {
         return false;
     }
     !crate::server::core::account_store::is_accio_family(provider)

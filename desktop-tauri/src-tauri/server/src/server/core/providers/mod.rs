@@ -107,7 +107,8 @@ pub mod catpaw;
 pub mod cline;
 /// CodeArts（华为云 snap-access）。适配器实现在 `codearts/`，
 /// 语义来源与施工计划见 `cpa-deploy/notes/agent2api-codearts-port-plan.md`。
-/// 目前只落了签名层，尚未进 `ProviderKind`（不参与目录与转发）。
+/// 两个区域（国内版 `codearts` / 国际版 `codearts-intl`）共用这一份实现，
+/// 按 `codearts::region::Region` 参数化（见该模块头）。
 pub mod codearts;
 pub mod content_block;
 /// 自定义提供商的**运行期接线**（目录聚合的追加段 + Chat Completions 协议
@@ -304,10 +305,38 @@ pub enum ProviderKind {
     /// 它没有签到活动，运营玩法是限时发放的体验套餐（2026-09-28 那期是
     /// 每天一份新套餐，见 `zcode::claim` 的模块头）。
     ZcodeIntl,
-    /// CodeArts（华为云 AI 代码助手 / snap-access）。适配实现在 `codearts/`：
-    /// 请求要华为云 SDK-HMAC-SHA256 签名、对话是有状态的（每账号只允许 3 路
-    /// 并发会话，靠 chat-session 心跳占槽），因此 `is_stateful()` 为 true。
+    /// CodeArts（华为云 AI 代码助手 / snap-access）**国内版**。适配实现在
+    /// `codearts/`：请求要华为云 SDK-HMAC-SHA256 签名、对话是有状态的
+    /// （每账号只允许 3 路并发会话，靠 chat-session 心跳占槽），因此
+    /// `is_stateful()` 为 true。
+    ///
+    /// ── 与 [`ProviderKind::CodeArtsIntl`] 是同一套协议的两个区域 ────
+    /// 两地共用同一份实现（`codearts::CodeArtsAdapter` 持有一个
+    /// `codearts::region::Region`），差别只在**区域端点**：国内 `cn-north-4`
+    /// （`snap-access.cn-north-4.myhuaweicloud.com` / 门户 `codearts.huaweicloud.com`），
+    /// 国际 `ap-southeast-1`（`snap-access.ap-southeast-1...` /
+    /// 门户 `codearts.ap-southeast-1.huaweicloud.com`）。
+    /// **授权面（STS 令牌 / 身份端点）两地同一台** `sts.cn-north-4.myhuaweicloud.com`
+    /// —— 官方扩展 `product.json` 的 `HKFramework.iamStsOpenDomain` 不分区，
+    /// 国际区域的 `sts.<region>` 上该 API 会回 `STS5.1007`（见 `region` 的模块头）。
+    ///
+    /// ── provider id 为什么只有国际版是新 id ──────────────────────
+    /// 国内版保持 `"codearts"` 不动：它是存量账号的落盘契约（改名会让账号
+    /// 升级后变成「未知 provider」而静默消失）。国际版取 `"codearts-intl"`。
+    /// 地区 → provider 的互查在 `codearts::region::Region`（`kind` /
+    /// `provider_id` / `from_provider_id`），别处不要再写 `"codearts-intl"`
+    /// 这类字面量。
     CodeArts,
+    /// CodeArts **国际版**（`codearts-intl`）。与 [`ProviderKind::CodeArts`]
+    /// 同一套协议、不同区域（国际站仅在 **AP-Singapore / `ap-southeast-1`**
+    /// 提供，见 `codearts::region` 的模块头）。
+    ///
+    /// ── 为什么两个区域是两家 provider（与 AutoClaw / Accio / ZCode 同一思路）──
+    /// 把区域做成「一家的一个字段」会让区域变成**账号的属性**，界面上混在一起、
+    /// 「哪个账号走哪个站点」看不出来，账号记录也无法按区域隔离；两地的模型目录
+    /// 与凭据更是完全独立（STS 签发地不同，凭据不通用）。按两家建模之后各自有
+    /// 独立的账号、清单、启停与映射。
+    CodeArtsIntl,
     /// Trae（字节跳动 AI IDE 的 SOLO 通道）。适配实现在 `providers::trae/`。
     ///
     /// ── 为什么只有一家、没有"国际版"伴生 ─────────────────────
@@ -426,7 +455,12 @@ pub const PROVIDERS: &[ProviderMeta] = &[
     // 合并时同名模型先归谁家 —— 国内版在前（国内网络环境下更常被添加的那个）。
     ProviderMeta { id: "zcode", label: "ZCode 国内版" },
     ProviderMeta { id: "zcode-intl", label: "ZCode 国际版" },
-    ProviderMeta { id: "codearts", label: "CodeArts" },
+    // CodeArts 两个区域**相邻**排列（与 AutoClaw / Accio / ZCode 同一理由：
+    // 同一条产品线的两个版本，中间隔着别家会让「找国际版」变成一次扫描）。
+    // 顺序也决定模型目录合并时同名模型先归谁家 —— 国内版在前（国内网络环境下
+    // 更常被添加的那个）。
+    ProviderMeta { id: "codearts", label: "CodeArts 国内版" },
+    ProviderMeta { id: "codearts-intl", label: "CodeArts 国际版" },
     ProviderMeta { id: "trae", label: "Trae" },
     // Loomy（讯飞）：单一地区、单一入口（手机号验证码登录），没有国际版伴生。
     ProviderMeta { id: "loomy", label: "Loomy" },
@@ -508,6 +542,7 @@ pub fn kind_from_id(id: &str) -> Option<ProviderKind> {
         "zcode" => Some(ProviderKind::Zcode),
         "zcode-intl" => Some(ProviderKind::ZcodeIntl),
         "codearts" => Some(ProviderKind::CodeArts),
+        "codearts-intl" => Some(ProviderKind::CodeArtsIntl),
         "trae" => Some(ProviderKind::Trae),
         "loomy" => Some(ProviderKind::Loomy),
         "kuku" => Some(ProviderKind::Kuku),
@@ -544,6 +579,7 @@ pub const fn kind_id(kind: ProviderKind) -> &'static str {
         ProviderKind::Zcode => "zcode",
         ProviderKind::ZcodeIntl => "zcode-intl",
         ProviderKind::CodeArts => "codearts",
+        ProviderKind::CodeArtsIntl => "codearts-intl",
         ProviderKind::Trae => "trae",
         ProviderKind::Loomy => "loomy",
         ProviderKind::Kuku => "kuku",

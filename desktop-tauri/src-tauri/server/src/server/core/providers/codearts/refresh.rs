@@ -32,6 +32,7 @@ use crate::server::logging;
 
 use super::credentials::Credential;
 use super::oauth;
+use super::region::Region;
 
 /// 续期提前量：15 分钟（参考实现的 `onDemandRefreshLead`）。
 pub const REFRESH_LEAD_MS: i64 = 15 * 60 * 1000;
@@ -74,13 +75,14 @@ pub fn should_refresh(credential: &Credential, force: bool, now_ms: i64) -> bool
 pub async fn ensure_fresh_credential(
     account_key: &str,
     credential: &Credential,
+    region: Region,
     force: bool,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
     if !should_refresh(credential, force, logging::now_ms()) {
         return Ok(credential.clone());
     }
-    match refresh_single_flight(account_key, credential, proxy).await {
+    match refresh_single_flight(account_key, credential, region, proxy).await {
         Ok(fresh) => Ok(fresh),
         Err(error) => {
             if !credential.needs_refresh(0, logging::now_ms()) {
@@ -99,6 +101,7 @@ pub async fn ensure_fresh_credential(
 pub async fn refresh_single_flight(
     account_key: &str,
     credential: &Credential,
+    region: Region,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
     if !credential.can_refresh() {
@@ -111,7 +114,7 @@ pub async fn refresh_single_flight(
     match flights().join(&key) {
         Join::Waiter(waiter) => waiter.wait().await,
         Join::Leader(leader) => {
-            let result = oauth::refresh_credential(credential, proxy).await;
+            let result = oauth::refresh_credential(region, credential, proxy).await;
             leader.finish(result.clone());
             result
         }
@@ -157,12 +160,13 @@ pub const SINGLE_FLIGHT_WAIT_HINT_MS: u64 = Duration::from_secs(30).as_millis() 
 /// 是刻意关着的（见 `mod.rs`），而不是「先开着试试看」。
 pub async fn ensure_fresh(
     store: &AccountStore,
+    region: Region,
     account_id: &str,
     force: bool,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
     let record = store
-        .codearts_account_record(account_id)
+        .codearts_account_record(region, account_id)
         .ok_or_else(|| GatewayError::with_status(503, "没有可用的 CodeArts 账号：请在账号页添加并启用账号"))?;
     let credential = Credential::from_payload(&record).map_err(|reason| GatewayError::with_status(400, reason))?;
     if !force && !credential.needs_refresh(REFRESH_LEAD_MS, logging::now_ms()) {
@@ -183,7 +187,7 @@ pub async fn ensure_fresh(
     let (fresh, leader_should_persist) = match flights().join(&key) {
         Join::Waiter(waiter) => (waiter.wait().await?, false),
         Join::Leader(leader) => {
-            let result = oauth::refresh_credential(&credential, proxy).await;
+            let result = oauth::refresh_credential(region, &credential, proxy).await;
             leader.finish(result.clone());
             (result?, true)
         }
@@ -213,6 +217,7 @@ pub async fn ensure_fresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::region::Region;
     use crate::server::core::providers::codearts::credentials::{DpopKeyPair, Jwk, OAuthContext, PkcePair};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -328,7 +333,7 @@ mod tests {
             secret_access_key: "SK".to_string(),
             ..Credential::default()
         };
-        let error = refresh_single_flight("acct", &bare, None)
+        let error = refresh_single_flight("acct", &bare, Region::Cn, None)
             .await
             .expect_err("没有续期材料就该本地报错");
         assert_eq!(400, error.status_code);
@@ -341,7 +346,7 @@ mod tests {
     async fn a_fresh_credential_never_touches_the_network() {
         let mut credential = refreshable_credential();
         credential.expires_at = "2099-01-01T00:00:00Z".to_string();
-        let fresh = ensure_fresh_credential("codearts:test-fresh:1", &credential, false, None)
+        let fresh = ensure_fresh_credential("codearts:test-fresh:1", &credential, Region::Cn, false, None)
             .await
             .expect("不临期时应当直接返回原凭据");
         assert_eq!(credential.refresh_token, fresh.refresh_token);

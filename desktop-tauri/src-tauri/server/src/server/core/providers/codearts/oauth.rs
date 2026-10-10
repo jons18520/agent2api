@@ -32,10 +32,14 @@ use crate::server::errors::GatewayError;
 use super::chat;
 use super::credentials::{Credential, OAuthContext, PkcePair};
 use super::dpop::DpopKey;
+use super::region::Region;
 
 /// 与官方扩展一致的固定 client_id。
 pub const CLIENT_ID: &str = "vscode-codebot";
-/// 令牌端点与身份端点（两个地区目前共用同一套 STS 主机）。
+/// 令牌端点与身份端点（**两地共用**，授权面不分区；真正的取值走
+/// [`Region::token_url`] / [`Region::identity_url`]，两地的 STS 基址都是 `sts.cn-north-4`）。
+/// 这两个常量保留是为了兼容既有引用（`--ignored` 的上游阶梯测试在用），
+/// 新代码请按区域取。
 pub const TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
 pub const IDENTITY_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v5/caller-identity";
 const REQUEST_TIMEOUT_MS: u64 = 30_000;
@@ -48,7 +52,8 @@ const REQUEST_TIMEOUT_MS: u64 = 30_000;
 // 所以我们两个都带，回调路由两条都注册，见 `http.rs`）。
 // 参数顺序与取值逐字照抄参考实现，`authorize_url` 的测试拿它生成的金向量钉住。
 
-/// 授权页所在站点（与 API 的 `snap-access` 不是一台）。
+/// 授权页所在站点（与 API 的 `snap-access` 不是一台；**国内版默认值**，
+/// 国际版是 `codearts.ap-southeast-1.huaweicloud.com`，见 [`Region::web_login_base`]）。
 pub const WEB_LOGIN_BASE: &str = "https://codearts.huaweicloud.com";
 /// portal 固定回到的路径（我们不能改，改了就 404 在它自己的站上）。
 pub const CALLBACK_PATH: &str = "/oauth/callback";
@@ -74,6 +79,7 @@ struct TokenResponse {
 
 /// 用授权码换凭据（网页登录的最后一步）。
 pub async fn exchange_authorization_code(
+    region: Region,
     code: &str,
     redirect_uri: &str,
     context: &OAuthContext,
@@ -86,7 +92,7 @@ pub async fn exchange_authorization_code(
         ("grant_type".to_string(), "authorization_code".to_string()),
         ("redirect_uri".to_string(), redirect_uri.to_string()),
     ];
-    token_request(form, context, "", proxy).await
+    token_request(region, form, context, "", proxy).await
 }
 
 /// 用 refresh token 换一套新的临时 AK/SK/STS。
@@ -95,6 +101,7 @@ pub async fn exchange_authorization_code(
 /// 由于同一个 refresh token 只能换一次，这条路径必须由调用方保证单飞
 /// （`refresh.rs` 用进程级单飞表，与 qoder 同一套原语）。
 pub async fn refresh_credential(
+    region: Region,
     existing: &Credential,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
@@ -111,7 +118,7 @@ pub async fn refresh_credential(
         ("grant_type".to_string(), "refresh_token".to_string()),
         ("refresh_token".to_string(), existing.refresh_token.trim().to_string()),
     ];
-    let mut fresh = token_request(form, context, existing.refresh_token.trim(), proxy).await?;
+    let mut fresh = token_request(region, form, context, existing.refresh_token.trim(), proxy).await?;
     // 续期响应不带身份信息（只有短期材料），所以身份从旧凭据继承下来，
     // 否则账号会在每次刷新后"失去"domain/user，同账号判定与单飞 key 全乱
     fresh.domain_id = first_non_empty(&[&fresh.domain_id, &existing.domain_id]);
@@ -123,15 +130,18 @@ pub async fn refresh_credential(
 
 /// 打一次令牌端点并按上游回复组装凭据（两个 grant 共用）。
 async fn token_request(
+    region: Region,
     form: Vec<(String, String)>,
     context: &OAuthContext,
     previous_refresh_token: &str,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
+    // 令牌端点按区域取（两地都是 `sts.cn-north-4`，授权面不分区，见 `region` 的模块头）
+    let token_url = region.token_url();
     let key = DpopKey::from_key_pair(&context.dpop_key_pair)
         .map_err(|reason| GatewayError::with_status(400, reason))?;
     let proof = key
-        .proof("POST", TOKEN_URL, crate::server::logging::now_ms())
+        .proof("POST", &token_url, crate::server::logging::now_ms())
         .map_err(|reason| GatewayError::with_status(500, reason))?;
     let body = form
         .iter()
@@ -139,7 +149,7 @@ async fn token_request(
         .collect::<Vec<_>>()
         .join("&");
     let response = egress::client_for(proxy)
-        .post(TOKEN_URL)
+        .post(&token_url)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
         .header("DPoP", proof)
@@ -212,7 +222,7 @@ async fn token_request(
             credential.user_name = name;
         }
         None => {
-            if let Some((domain, user, name)) = fetch_identity(&credential, proxy).await? {
+            if let Some((domain, user, name)) = fetch_identity(region, &credential, proxy).await? {
                 credential.domain_id = domain;
                 credential.user_id = user;
                 credential.user_name = name;
@@ -273,17 +283,19 @@ fn identity_from_refresh_token(refresh_token: &str) -> Option<(String, String, S
 
 /// 问身份端点（需要签名，用的是刚拿到的那套临时凭据）。
 async fn fetch_identity(
+    region: Region,
     credential: &Credential,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Option<(String, String, String)>, GatewayError> {
+    let identity_url = region.identity_url();
     let headers = vec![
         ("Accept".to_string(), "application/json".to_string()),
         ("Content-Type".to_string(), "application/json".to_string()),
     ];
-    let signed = super::signer::sign("GET", IDENTITY_URL, &headers, b"", &signer_credential(credential), false)
+    let signed = super::signer::sign("GET", &identity_url, &headers, b"", &signer_credential(credential), false)
         .map_err(|reason| GatewayError::with_status(500, reason))?;
     let mut request = egress::client_for(proxy)
-        .get(IDENTITY_URL)
+        .get(&identity_url)
         .timeout(Duration::from_millis(REQUEST_TIMEOUT_MS));
     for (name, value) in signed {
         request = request.header(name.as_str(), value.as_str());
@@ -400,6 +412,10 @@ pub fn new_login_context() -> Result<OAuthContext, String> {
 /// 进行中的一轮登录。
 #[derive(Clone, Debug)]
 pub struct PendingLogin {
+    /// 这一轮属于哪个区域（国内版 / 国际版）—— 换码、换 ticket、落账号都要按它
+    /// 走对应区域的 STS 与账号集合。**这是这一轮登录的区域事实来源**：
+    /// 回调是免鉴权路由、拿不到任务上下文，只能靠待办条目自己记着。
+    pub region: Region,
     /// 我们生成的轮次标识 —— **同时充当登录任务的 state**（portal 回调里能带回来时
     /// 就直接按它配对，带不回来时退化成「逐个候选试」，见 `candidates`）。
     pub ticket_id: String,
@@ -452,7 +468,7 @@ pub fn loopback_base() -> Option<String> {
 ///
 /// `ticket_id` 同时充当登录任务的 **state**：任务表与待办表用同一个键，回调无论
 /// 带不带配对信息，收尾那条路都能只认这一个值。
-pub fn begin_login(plugin_name: &str, plugin_version: &str, language: &str) -> Result<(String, PendingLogin), String> {
+pub fn begin_login(region: Region, plugin_name: &str, plugin_version: &str, language: &str) -> Result<(String, PendingLogin), String> {
     let port = LOOPBACK_PORT.get().copied().ok_or("网关还在启动中，回调端口尚未确定，请稍后重试")?;
     let context = new_login_context()?;
     let mut seed = [0u8; 16];
@@ -460,6 +476,7 @@ pub fn begin_login(plugin_name: &str, plugin_version: &str, language: &str) -> R
     let ticket_id = seed.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
     let callback_url = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
     let pending = PendingLogin {
+        region,
         started_at_ms: logging::now_ms(),
         ticket_id,
         context,
@@ -468,7 +485,7 @@ pub fn begin_login(plugin_name: &str, plugin_version: &str, language: &str) -> R
         poll_claimed: false,
     };
     let url = authorize_url(
-        WEB_LOGIN_BASE,
+        &region.web_login_base(),
         &pending.ticket_id,
         &pending.context.pkce_pair,
         &pending.callback_url,
@@ -595,7 +612,7 @@ pub fn candidates() -> Vec<PendingLogin> {
 
 /// 用授权码换凭据（`redirect_uri` 必须与交给 portal 的那份逐字相同）。
 pub async fn exchange_for(pending: &PendingLogin, code: &str, proxy: Option<&ResolvedProxy>) -> Result<Credential, GatewayError> {
-    exchange_authorization_code(code, &pending.callback_url, &pending.context, proxy).await
+    exchange_authorization_code(pending.region, code, &pending.callback_url, &pending.context, proxy).await
 }
 
 /// ticket 轮询通道：portal 只把 secret 送到本机回调、授权码始终没送到时用它。
@@ -842,7 +859,7 @@ mod tests {
         };
         // 这份密钥要用两次：一次经 refresh_credential，一次直接进三点阶梯
         let key = DpopKey::from_key_pair(&credential.oauth_context.as_ref().unwrap().dpop_key_pair).unwrap();
-        let result = refresh_credential(&credential, None).await;
+        let result = refresh_credential(Region::Cn, &credential, None).await;
         match result {
             Ok(_) => panic!("编造的刷新令牌居然换到了凭据？"),
             Err(error) => {

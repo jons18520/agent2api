@@ -22,6 +22,7 @@ pub mod models;
 pub mod oauth;
 pub mod redact;
 pub mod refresh;
+pub mod region;
 pub mod session;
 pub mod signer;
 pub mod size_gate;
@@ -44,16 +45,29 @@ use super::adapter::{ChatRequestPlan, ProviderAdapter, UpstreamErrorClass};
 static SESSION_GATE: std::sync::OnceLock<session::SessionGate> = std::sync::OnceLock::new();
 use crate::server::core::providers::ProviderKind;
 
-/// CodeArts 适配器（无状态字段：目录缓存在 `models` 里，凭据在账号存储里）。
-pub struct CodeArtsAdapter;
+/// CodeArts 适配器。持有**区域**（国内版 / 国际版）—— 这是两地唯一的差别来源：
+/// 区域网关、STS、网页登录门户、目录缓存槽、账号集合全部由它决定
+/// （见 `region` 的模块头）。其余字段无状态（目录缓存在 `models` 里，凭据在账号
+/// 存储里）。
+pub struct CodeArtsAdapter {
+    region: region::Region,
+}
 
-/// 静态实例：`adapter_for` 要的是 `&'static dyn ProviderAdapter`。
-pub static CODEARTS_ADAPTER: CodeArtsAdapter = CodeArtsAdapter;
+/// 国内版静态实例（`adapter_for` 要的是 `&'static dyn ProviderAdapter`）。
+pub static CODEARTS_ADAPTER: CodeArtsAdapter = CodeArtsAdapter { region: region::Region::Cn };
+/// 国际版静态实例。与国内版是**两个 provider、两个实例**（同一份实现的按区域
+/// 参数化，与 AutoClaw / Accio / ZCode 同款）。
+pub static CODEARTS_INTL_ADAPTER: CodeArtsAdapter = CodeArtsAdapter { region: region::Region::Intl };
 
 impl CodeArtsAdapter {
     /// 从账号记录读回凭据（账号存储写的就是 `Credential` 的字段名）。
     pub fn credential(record: &Value) -> Result<credentials::Credential, GatewayError> {
         credentials::Credential::from_payload(record).map_err(|reason| GatewayError::with_status(503, reason))
+    }
+
+    /// 本适配器的区域。
+    pub fn region(&self) -> region::Region {
+        self.region
     }
 }
 
@@ -99,12 +113,12 @@ fn benefit_cooldown_group(catalog: &models::Catalog, wire_model: &str) -> Vec<St
 
 impl ProviderAdapter for CodeArtsAdapter {
     fn kind(&self) -> ProviderKind {
-        ProviderKind::CodeArts
+        self.region.kind()
     }
 
     /// 清单来自刷新链路落的进程内缓存（`list_models` 是同步契约，发不了网络请求）。
     fn list_models(&self) -> Vec<Value> {
-        models::list()
+        models::list(self.region)
     }
 
     /// 防御性报错：CodeArts 的对话要先占会话槽（每账号 3 路并发）、再签一次名、
@@ -144,15 +158,17 @@ impl ProviderAdapter for CodeArtsAdapter {
         telemetry: &'a std::sync::Arc<RequestTelemetry>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ForwardOutcome, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
+            // 本区域的两台网关地址（区域网关 + 可选福利网关），后面多处要用
+            let base_url = self.region.base_url();
             // ① 凭据（含临期主动续期与写回）；代理沿用编排层为本账号解析出的那份
-            let credential = refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await?;
+            let credential = refresh::ensure_fresh(store, self.region, account_id, false, proxy.as_ref()).await?;
             if !credential.valid() {
                 return Err(GatewayError::with_status(503, "CodeArts 账号缺少可用的临时凭据，请重新登录"));
             }
 
             // ② 模型名归一：客户端习惯小写，上游要真名；福利模型要带 maas_type
             let requested = body.get("model").and_then(Value::as_str).unwrap_or("").trim();
-            let catalog = models::cached_catalog().ok_or_else(|| GatewayError::with_status(
+            let catalog = models::cached_catalog(self.region).ok_or_else(|| GatewayError::with_status(
                 503,
                 "CodeArts 模型目录还没拉取过：请先在模型页对该账号执行一次「获取模型」",
             ))?;
@@ -206,15 +222,15 @@ impl ProviderAdapter for CodeArtsAdapter {
             // 只按硬编码默认值准入的话，那个数字对本家就只是装饰（口径与
             // `session::SessionGate::limit_for` 里写的「0 = 继承默认」一致）。
             let gate_override = store
-                .codearts_account_record(account_id)
+                .codearts_account_record(self.region, account_id)
                 .and_then(|record| record.get("maxConcurrent").and_then(Value::as_u64));
             let permit = SESSION_GATE
                 .get_or_init(|| session::SessionGate::new(session::DEFAULT_SESSION_LIMIT))
-                .acquire(models::DEFAULT_BASE_URL, &gate_identity, gate_override)?;
+                .acquire(&base_url, &gate_identity, gate_override)?;
 
             // ④ 占一个上游会话槽（心跳 busy + 后台续期）
             let mut options = session::SessionOptions::new(
-                models::DEFAULT_BASE_URL,
+                &base_url,
                 &credential,
                 chat::DEFAULT_LANGUAGE,
             );
@@ -254,7 +270,7 @@ impl ProviderAdapter for CodeArtsAdapter {
                     );
                 }
                 match chat::build_upstream_request(
-                    models::DEFAULT_BASE_URL,
+                    &base_url,
                     &upstream_model,
                     outbound,
                     true,
@@ -499,7 +515,7 @@ impl ProviderAdapter for CodeArtsAdapter {
     /// （目录还没拉过 / 已下架）或不是福利源时，只记本次的真名，与默认行为
     /// 一致。纯逻辑在模块级 [`benefit_cooldown_group`]（吃目录参数，可测）。
     fn quota_cooldown_models(&self, _account_id: &str, wire_model: &str) -> Vec<String> {
-        match models::cached_catalog() {
+        match models::cached_catalog(self.region) {
             Some(catalog) => benefit_cooldown_group(&catalog, wire_model),
             None => vec![wire_model.to_string()],
         }
@@ -524,8 +540,8 @@ impl ProviderAdapter for CodeArtsAdapter {
         account_id: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            let proxy = record_proxy(store, account_id)?;
-            Ok(refresh::ensure_fresh(store, account_id, false, proxy.as_ref())
+            let proxy = record_proxy(store, self.region, account_id)?;
+            Ok(refresh::ensure_fresh(store, self.region, account_id, false, proxy.as_ref())
                 .await?
                 .access_key_id)
         })
@@ -545,8 +561,8 @@ impl ProviderAdapter for CodeArtsAdapter {
         Box<dyn std::future::Future<Output = Result<String, GatewayError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            let proxy = record_proxy(store, account_id)?;
-            Ok(refresh::ensure_fresh(store, account_id, true, proxy.as_ref())
+            let proxy = record_proxy(store, self.region, account_id)?;
+            Ok(refresh::ensure_fresh(store, self.region, account_id, true, proxy.as_ref())
                 .await?
                 .access_key_id)
         })
@@ -557,7 +573,7 @@ impl ProviderAdapter for CodeArtsAdapter {
     /// 后台不刷的话，闲置一阵后的第一个请求要先付一次换证的延时）。
     fn credentials_expiring(&self, store: &AccountStore, account_id: &str) -> bool {
         store
-            .codearts_account_record(account_id)
+            .codearts_account_record(self.region, account_id)
             .and_then(|record| credentials::Credential::from_payload(&record).ok())
             .is_some_and(|credential| credential.can_refresh() && credential.needs_refresh(refresh::REFRESH_LEAD_MS, crate::server::logging::now_ms()))
     }
@@ -581,8 +597,8 @@ impl ProviderAdapter for CodeArtsAdapter {
         Box::pin(async move {
             let credential = welfare::current_credential(store, account_id).await?;
             let (statistics, benefit) = balance::fetch_both(
-                models::DEFAULT_BASE_URL,
-                models::DEFAULT_BENEFIT_GATEWAY_URL,
+                &self.region.base_url(),
+                self.region.benefit_gateway_url().as_deref().unwrap_or(""),
                 &credential,
                 chat::DEFAULT_LANGUAGE,
                 chat::DEFAULT_PLUGIN_VERSION,
@@ -669,6 +685,7 @@ impl ProviderAdapter for CodeArtsAdapter {
     /// 会互相把对方的待办取空（先到的赢、后到的 404）。所以入口只有一个。
     fn build_login_url(&self) -> Option<(String, String)> {
         let (url, pending) = oauth::begin_login(
+            self.region,
             chat::DEFAULT_PLUGIN_NAME,
             chat::DEFAULT_PLUGIN_VERSION,
             chat::DEFAULT_LANGUAGE,
@@ -707,20 +724,23 @@ impl ProviderAdapter for CodeArtsAdapter {
             // 重试」挡住 —— 那次「失败」发生在账号存在之前（10:27）。
             // 与 accio / qoder 逐字同口径：自动路径 `unchanged()`（没刷，
             // 不是失败），点名取不到才 `failed()`。
-            if store.codearts_account_record(account_id).is_none() {
+            if store.codearts_account_record(self.region, account_id).is_none() {
                 crate::server::logging::verbose("[Models]", "CodeArts 模型目录刷新跳过：尚未添加 CodeArts 账号");
                 if account_id.trim().is_empty() {
                     return super::adapter::ModelRefreshOutcome::unchanged();
                 }
                 return super::adapter::ModelRefreshOutcome::failed("指定的 CodeArts 账号不存在或不可用，请重新选择");
             };
-            let credential = match proxy_and_fresh(store, account_id).await {
+            let credential = match proxy_and_fresh(store, self.region, account_id).await {
                 Ok(credential) => credential,
                 Err(error) => return super::adapter::ModelRefreshOutcome::failed(error.message),
             };
+            // 区域端点：国际版没有福利网关（`None`），`discover` 会自动跳过那个源
+            let base_url = self.region.base_url();
+            let benefit_gateway_url = self.region.benefit_gateway_url();
             let endpoints = models::CatalogEndpoints {
-                base_url: models::DEFAULT_BASE_URL,
-                benefit_gateway_url: Some(models::DEFAULT_BENEFIT_GATEWAY_URL),
+                base_url: &base_url,
+                benefit_gateway_url: benefit_gateway_url.as_deref(),
                 plugin_version: chat::DEFAULT_PLUGIN_VERSION,
                 language: chat::DEFAULT_LANGUAGE,
             };
@@ -731,7 +751,7 @@ impl ProviderAdapter for CodeArtsAdapter {
                 );
             }
             let count = catalog.models.len();
-            models::store_catalog(catalog);
+            models::store_catalog(self.region, catalog);
             super::adapter::ModelRefreshOutcome::refreshed(count)
         })
     }
@@ -742,10 +762,11 @@ impl ProviderAdapter for CodeArtsAdapter {
 /// "上游超时"，而不是"你配的代理解析不了"）。
 fn record_proxy(
     store: &AccountStore,
+    region: region::Region,
     account_id: &str,
 ) -> Result<Option<crate::server::core::proxies::ResolvedProxy>, GatewayError> {
     let record = store
-        .codearts_account_record(account_id)
+        .codearts_account_record(region, account_id)
         .ok_or_else(|| GatewayError::with_status(503, "没有可用的 CodeArts 账号：请在账号页添加并启用账号"))?;
     use crate::server::core::proxies::ProxyResolution;
     match crate::server::core::proxies::resolve_account_proxy(record.get("proxy")) {
@@ -756,9 +777,13 @@ fn record_proxy(
 }
 
 /// 没有编排层代理解析的那两条钩子（面板点刷新 / 目录刷新）用的组合。
-async fn proxy_and_fresh(store: &AccountStore, account_id: &str) -> Result<credentials::Credential, GatewayError> {
-    let proxy = record_proxy(store, account_id)?;
-    refresh::ensure_fresh(store, account_id, false, proxy.as_ref()).await
+async fn proxy_and_fresh(
+    store: &AccountStore,
+    region: region::Region,
+    account_id: &str,
+) -> Result<credentials::Credential, GatewayError> {
+    let proxy = record_proxy(store, region, account_id)?;
+    refresh::ensure_fresh(store, region, account_id, false, proxy.as_ref()).await
 }
 
 /// benefit 自动注册（claim）的**进程级去抖**：距上次尝试不足窗口期返回 false。
@@ -838,7 +863,8 @@ mod store_hooks {
     use crate::server::db::Db;
 
     use super::{benefit_cooldown_group, daily_pool_reset_at, models};
-    use super::{CODEARTS_ADAPTER, CodeArtsAdapter, ProviderAdapter};
+    use super::region::Region;
+    use super::{CODEARTS_ADAPTER, ProviderAdapter};
 
     static SEQ: AtomicUsize = AtomicUsize::new(0);
 
@@ -875,9 +901,9 @@ mod store_hooks {
     fn expiring_follows_the_lead_window_and_a_usable_refresh_chain() {
         let store = store();
         // 三条各代表一种「后台维护该不该动手」：远端到期 / 只剩五分钟 / 临期但刷不了
-        store.add_codearts_account(&credential("AK_FAR", "far", 120, true), None, "manual").unwrap();
-        store.add_codearts_account(&credential("AK_NEAR", "near", 5, true), None, "manual").unwrap();
-        store.add_codearts_account(&credential("AK_BARE", "bare", 5, false), None, "manual").unwrap();
+        store.add_codearts_account(Region::Cn, &credential("AK_FAR", "far", 120, true), None, "manual").unwrap();
+        store.add_codearts_account(Region::Cn, &credential("AK_NEAR", "near", 5, true), None, "manual").unwrap();
+        store.add_codearts_account(Region::Cn, &credential("AK_BARE", "bare", 5, false), None, "manual").unwrap();
         let id_of = |user: &str| {
             store
                 .list_accounts()["accounts"]
@@ -902,8 +928,8 @@ mod store_hooks {
     #[tokio::test]
     async fn force_refresh_is_the_override_not_the_default_no_op() {
         let store = store();
-        store.add_codearts_account(&credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
-        let id = store.codearts_account_record("").expect("账号应当可读")["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(Region::Cn, &credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
+        let id = store.codearts_account_record(Region::Cn, "").expect("账号应当可读")["id"].as_str().unwrap().to_string();
 
         // 非强制那条：没临期就原样返回，**不发网络请求**（临时库里是假串，真刷必炸）
         let token = CODEARTS_ADAPTER.ensure_access_token(&store, &id).await.expect("未临期应当直接用盘上这份");
@@ -1016,8 +1042,8 @@ mod store_hooks {
         let catalog = local_catalog();
 
         let store = store();
-        store.add_codearts_account(&credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
-        let id = store.codearts_account_record("").expect("账号应当可读")["id"].as_str().unwrap().to_string();
+        store.add_codearts_account(Region::Cn, &credential("AK_BARE", "bare", 120, false), None, "manual").unwrap();
+        let id = store.codearts_account_record(Region::Cn, "").expect("账号应当可读")["id"].as_str().unwrap().to_string();
 
         // 与 provider_loop 会话式分支同一动作：按整组名单逐个记账，恢复时刻也走
         // 同一判据（认得出日池 ⇒ 下一个北京零点，见 `daily_pool_reset_at`）。
@@ -1039,7 +1065,7 @@ mod store_hooks {
         }
 
         let now = crate::server::logging::now_ms();
-        let limits = store.codearts_account_record("").unwrap()["rateLimits"].clone();
+        let limits = store.codearts_account_record(Region::Cn, "").unwrap()["rateLimits"].clone();
         let limits = limits.as_object().expect("rateLimits 应当是对象");
         // 别的福利模型名（本次没撞的那个）也必须有自己的冷却记录，且恢复时刻
         // 是日池重置点而不是 10 分钟兜底

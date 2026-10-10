@@ -438,13 +438,20 @@ pub async fn add_account(state: &ServerState, body: &Bytes) -> Response {
                 store.add_autoclaw_account(region, &payload, import_name)
             }
         }
-        // CodeArts：粘贴凭证（AK/SK/STS + domain/user + 可选的 refresh token 与
-        // oauth_context）。**不调上游**——凭据是登录换来的，添加时没有可交换的
-        // 授权码；目录与连通性由刷新链路验。
-        // 网页登录（要 DPoP + PKCE 回调）在 M5 后续切片，届时这里加一条分支。
-        Some(crate::server::core::providers::ProviderKind::CodeArts) => {
+        // CodeArts（两个区域）：粘贴凭证（AK/SK/STS + domain/user + 可选的
+        // refresh token 与 oauth_context）。**不调上游**——凭据是登录换来的，
+        // 添加时没有可交换的授权码；目录与连通性由刷新链路验。
+        //
+        // 两个区域走**同一份实现**、按区域参数化（`codearts::region`）：账号集合
+        // 按 provider 隔离，因此这里的 kind → region 必须逐字对应，不能让国际版
+        // 落进国内版的记录里（那会让两家的账号在同一分组里混着，选路也按错误的
+        // 区域网关发请求 —— 而凭据是**区域签发**的，跨区域必然 401）。
+        Some(kind @ (crate::server::core::providers::ProviderKind::CodeArts
+            | crate::server::core::providers::ProviderKind::CodeArtsIntl)) => {
+            let region = crate::server::core::providers::codearts::region::Region::from_kind(kind)
+                .unwrap_or(crate::server::core::providers::codearts::region::Region::Cn);
             match crate::server::core::providers::codearts::credentials::Credential::from_payload(&payload) {
-                Ok(credential) => store.add_codearts_account(&credential, import_name, "manual"),
+                Ok(credential) => store.add_codearts_account(region, &credential, import_name, "manual"),
                 Err(reason) => Err(AccountStoreError::new(reason, 400)),
             }
         }
@@ -870,12 +877,14 @@ pub async fn refresh_account(state: &ServerState, body: &Bytes) -> Response {
             return refresh_provider_account(state, &id, region.kind()).await;
         }
     }
-    // CodeArts：一次性 refresh token + 写回，必须走适配器。
+    // CodeArts（两个区域）：一次性 refresh token + 写回，必须走适配器。
     // **这条不能省**：漏了就会落到下面的 workbuddy 兜底链路，用户得到一条与
     // 本家毫无关系的错误（沙箱端到端实测抓到的原文是
     // `auth/token/refresh 失败: client key [] not found`）。
-    if state.store().codearts_account_record(&id).is_some() {
-        return refresh_provider_account(state, &id, ProviderKind::CodeArts).await;
+    // 区域由记录自己回答（`codearts_region_of`）—— 账号集合按 provider 隔离，
+    // 同一 id 不可能同时属于两个区域（撞 id 在存储层就报错了）。
+    if let Some(region) = state.store().codearts_region_of(&id) {
+        return refresh_provider_account(state, &id, region.kind()).await;
     }
     // Trae：一次性 refreshToken + 每次换发都轮换，必须走它自己的适配器
     // （`ExchangeToken`）。**这条也不能省**：漏了就落到下面的 workbuddy 兜底，

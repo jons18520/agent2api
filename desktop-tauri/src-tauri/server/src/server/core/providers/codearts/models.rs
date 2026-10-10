@@ -35,6 +35,7 @@ use crate::server::errors::GatewayError;
 
 use super::credentials::Credential;
 use super::oauth::signer_credential;
+use super::region::Region;
 use super::signer;
 
 /// 模型来自哪个源（决定路由与 `maas_type` 注入）。
@@ -314,7 +315,12 @@ pub fn merge_benefit(merged: Vec<ModelConfig>, benefit: Vec<ModelConfig>) -> Vec
 }
 
 /// 区域 API 与福利网关的默认地址（私有化部署要改的话走配置，别改常量）。
-pub const DEFAULT_BASE_URL: &str = "https://snap-access.cn-north-4.myhuaweicloud.com";
+///
+/// 这两个常量保留是为了兼容既有引用（测试与向量），它们的**事实来源**在
+/// `region::Region`：`DEFAULT_BASE_URL` 就是国内版的默认区域网关，
+/// `DEFAULT_BENEFIT_GATEWAY_URL` 就是国内版的默认福利网关。新代码请按区域取
+/// `region.base_url()` / `region.benefit_gateway_url()`。
+pub const DEFAULT_BASE_URL: &str = Region::Cn.default_base_url();
 pub const DEFAULT_BENEFIT_GATEWAY_URL: &str = "https://opengw.developer.huaweicloud.com";
 
 /// 一次目录发现要用的上游地址。
@@ -599,15 +605,23 @@ fn form_escape(value: &str) -> String {
 /// 该账号一个模型都没返回时，缓存就是空的 —— `list_models()` 返回空清单，
 /// 上层据此报"账号没有可用模型"。**绝不**塞静态兜底：那会广告出一批
 /// "列出来但一调就 400"的幽灵模型（§3.4 的坑，CPA 侧删掉静态列表才治好）。
-static CACHED: std::sync::OnceLock<std::sync::Mutex<Option<CachedCatalog>>> = std::sync::OnceLock::new();
+/// ── 为什么每个区域各占一格缓存 ──────────────────────────────
+/// 两个区域打的是两台网关、两份清单（国内 `cn-north-4` / 国际 `ap-southeast-1`，
+/// 见 `region` 的模块头）。共用一格会让后刷的区域把先刷的覆盖掉 —— 与 WorkBuddy
+/// 拆家前「单槽缓存互相覆盖」（issue #74）是同一个坑。因此按区域分格。
+static CACHED_CN: std::sync::OnceLock<std::sync::Mutex<Option<CachedCatalog>>> = std::sync::OnceLock::new();
+static CACHED_INTL: std::sync::OnceLock<std::sync::Mutex<Option<CachedCatalog>>> = std::sync::OnceLock::new();
 
 struct CachedCatalog {
     catalog: Catalog,
     fetched_at_ms: i64,
 }
 
-fn cache_slot() -> &'static std::sync::Mutex<Option<CachedCatalog>> {
-    CACHED.get_or_init(|| std::sync::Mutex::new(None))
+fn cache_slot(region: Region) -> &'static std::sync::Mutex<Option<CachedCatalog>> {
+    match region {
+        Region::Cn => CACHED_CN.get_or_init(|| std::sync::Mutex::new(None)),
+        Region::Intl => CACHED_INTL.get_or_init(|| std::sync::Mutex::new(None)),
+    }
 }
 
 /// 缓存有效期：正常 5 分钟；**有告警时 30 秒**（参考实现同款 —— 少几个模型时
@@ -620,14 +634,14 @@ pub const CACHE_TTL_WARNING_MS: i64 = 30 * 1000;
 /// 持久化这一步不是可选的优化：**没有它，进程重启后那一次刷新若失败，
 /// 上游新增的模型会消失、已下架的又回来被广告出去**。缓存不带有效期
 /// （宁可给一份旧清单也不退回静态兜底），时效性仍由刷新链路负责。
-pub fn store_catalog(catalog: Catalog) -> Catalog {
+pub fn store_catalog(region: Region, catalog: Catalog) -> Catalog {
     let now = crate::server::logging::now_ms();
     let entries = entries_of(&catalog);
     {
-        let mut slot = cache_slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut slot = cache_slot(region).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         *slot = Some(CachedCatalog { catalog: catalog.clone(), fetched_at_ms: now });
     }
-    crate::server::core::providers::catalog_cache::save(crate::server::core::providers::catalog_cache::SCOPE_CODEARTS, &entries, now);
+    crate::server::core::providers::catalog_cache::save(region.catalog_scope(), &entries, now);
     catalog
 }
 
@@ -639,20 +653,20 @@ pub fn store_catalog(catalog: Catalog) -> Catalog {
 /// `list()`（本来就有持久化回落）。两边不对称的后果是重启后
 /// 「模型列得出来、每一条都回 503 目录没拉取过」—— 用户必须手动点一次「获取模型」
 /// 才能恢复，而网关看起来完全正常。审计抓出来的，测试也补在文件末尾。
-pub fn cached_catalog() -> Option<Catalog> {
+pub fn cached_catalog(region: Region) -> Option<Catalog> {
     let from_memory = {
-        let slot = cache_slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let slot = cache_slot(region).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         slot.as_ref().map(|entry| entry.catalog.clone())
     };
-    from_memory.or_else(catalog_from_persisted)
+    from_memory.or_else(|| catalog_from_persisted(region))
 }
 
 /// 从持久化条目重建目录（`entries_of` 的逆）。
 ///
 /// 只重建转发与广告真正要用的字段；`source` 认不出来就整条丢掉而不是猜一个 ——
 /// 福利模型要不要带 `maas_type` 头**由这个字段决定**，猜错等于发一个上游不认的请求。
-fn catalog_from_persisted() -> Option<Catalog> {
-    let entries = crate::server::core::providers::catalog_cache::load(crate::server::core::providers::catalog_cache::SCOPE_CODEARTS).map(|cached| cached.models)?;
+fn catalog_from_persisted(region: Region) -> Option<Catalog> {
+    let entries = crate::server::core::providers::catalog_cache::load(region.catalog_scope()).map(|cached| cached.models)?;
     let mut catalog = Catalog::default();
     for entry in entries {
         let text = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("").to_string();
@@ -680,8 +694,8 @@ fn catalog_from_persisted() -> Option<Catalog> {
 
 /// 只给测试用：把内存槽清空，模拟进程重启（持久化那份不动）。
 #[cfg(test)]
-pub(crate) fn forget_memory_cache_for_tests() {
-    let mut slot = cache_slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+pub(crate) fn forget_memory_cache_for_tests(region: Region) {
+    let mut slot = cache_slot(region).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     *slot = None;
 }
 
@@ -695,19 +709,19 @@ pub fn ttl_for(catalog: &Catalog) -> i64 {
 
 /// 是否远程刷出来过（界面「来源」列与「更新日期」列要区分"远程拿到的"与
 /// "从来没拿过"）。
-pub fn remote_refreshed() -> bool {
-    cached_catalog().is_some_and(|catalog| !catalog.models.is_empty())
+pub fn remote_refreshed(region: Region) -> bool {
+    cached_catalog(region).is_some_and(|catalog| !catalog.models.is_empty())
 }
 
 /// 上一次成功刷新的时刻（毫秒）；从没刷过回 0（与其余十家同一口径）。
-pub fn last_refreshed_at() -> i64 {
-    let slot = cache_slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+pub fn last_refreshed_at(region: Region) -> i64 {
+    let slot = cache_slot(region).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     slot.as_ref().map(|entry| entry.fetched_at_ms).unwrap_or(0)
 }
 
 /// 缓存是否已过期（刷新链路据此决定要不要再拉一次）。
-pub fn cache_expired(now_ms: i64) -> bool {
-    let slot = cache_slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+pub fn cache_expired(region: Region, now_ms: i64) -> bool {
+    let slot = cache_slot(region).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     match slot.as_ref() {
         None => true,
         Some(entry) => now_ms - entry.fetched_at_ms >= ttl_for(&entry.catalog),
@@ -715,8 +729,8 @@ pub fn cache_expired(now_ms: i64) -> bool {
 }
 
 /// 从持久化缓存读回上次的清单（内存缓存为空时的回落）。
-fn persisted_entries() -> Vec<Value> {
-    crate::server::core::providers::catalog_cache::load(crate::server::core::providers::catalog_cache::SCOPE_CODEARTS)
+fn persisted_entries(region: Region) -> Vec<Value> {
+    crate::server::core::providers::catalog_cache::load(region.catalog_scope())
         .map(|cached| cached.models)
         .unwrap_or_default()
 }
@@ -725,12 +739,12 @@ fn persisted_entries() -> Vec<Value> {
 ///
 /// `contextWindow` 为 0 时不写这个键 —— 上层对缺字段是"未知"，对 0 是"没有
 /// 上下文"，两者含义不同。
-pub fn list() -> Vec<Value> {
+pub fn list(region: Region) -> Vec<Value> {
     // 回落已经在 `cached_catalog()` 里做了；这里再留一份持久化读法只为
     // 「重建不出来」（条目形状不认识）那种情况，别让广告突然变空。
-    match cached_catalog() {
+    match cached_catalog(region) {
         Some(catalog) => entries_of(&catalog),
-        None => persisted_entries(),
+        None => persisted_entries(region),
     }
 }
 
@@ -1063,8 +1077,8 @@ mod tests {
             ],
             warnings: Vec::new(),
         };
-        store_catalog(catalog);
-        let entries = list();
+        store_catalog(Region::Cn, catalog);
+        let entries = list(Region::Cn);
         assert_eq!(2, entries.len());
         assert_eq!("GLM-5.2", entries[0]["id"]);
         assert_eq!(202752, entries[0]["contextWindow"]);
@@ -1085,11 +1099,11 @@ mod tests {
     #[test]
     fn benefit_models_are_flagged_in_the_entry() {
         let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        store_catalog(Catalog {
+        store_catalog(Region::Cn, Catalog {
             models: parse_benefit(BENEFIT_CONFIG).unwrap(),
             warnings: Vec::new(),
         });
-        let entries = list();
+        let entries = list(Region::Cn);
         assert!(entries.iter().all(|entry| entry["benefit"] == true));
         assert!(entries.iter().all(|entry| entry["source"] == "benefit"));
     }
@@ -1173,13 +1187,13 @@ mod restart_tests {
             ],
             warnings: vec![],
         };
-        store_catalog(catalog.clone());
-        assert_eq!(Some(2), cached_catalog().map(|value| value.models.len()));
+        store_catalog(Region::Cn, catalog.clone());
+        assert_eq!(Some(2), cached_catalog(Region::Cn).map(|value| value.models.len()));
 
         // 模拟进程重启：清掉内存槽，持久化那份还在
-        forget_memory_cache_for_tests();
-        assert!(cache_slot().lock().unwrap().is_none(), "内存槽应当已空");
-        let restored = cached_catalog().expect("转发路径必须能从持久化那份重建");
+        forget_memory_cache_for_tests(Region::Cn);
+        assert!(cache_slot(Region::Cn).lock().unwrap().is_none(), "内存槽应当已空");
+        let restored = cached_catalog(Region::Cn).expect("转发路径必须能从持久化那份重建");
         assert_eq!(2, restored.models.len());
         let glm = restored.resolve("glm-5.2").expect("大小写归一后仍要能解析出来");
         assert_eq!(ModelSource::Agent, glm.source);
@@ -1188,7 +1202,7 @@ mod restart_tests {
         assert!(vl.supports_images, "多模态位只有 builtin 源有，重建时丢了就等于关掉视觉");
         assert!(!vl.source.needs_benefit_header());
         // `list()` 与转发读的是同一份真相 —— 这条断言就是当初那个 bug 的反面
-        assert_eq!(restored.models.len(), list().len(), "广告与转发可解析的集合必须一致");
+        assert_eq!(restored.models.len(), list(Region::Cn).len(), "广告与转发可解析的集合必须一致");
     }
 
     #[test]

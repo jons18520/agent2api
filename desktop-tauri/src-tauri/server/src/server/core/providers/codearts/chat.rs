@@ -1199,7 +1199,7 @@ mod tests {
         println!("① 刷新前目录：HTTP {status}（200 = 材料尚可用；401/400 = 已过期，正是要刷的场合）");
 
         // ② 真刷新（M1 的验收）：换一套新的 AK/SK/STS，refresh_token 可能轮换
-        let fresh = super::super::oauth::refresh_credential(&original, None)
+        let fresh = super::super::oauth::refresh_credential(super::super::region::Region::Cn, &original, None)
             .await
             .expect("刷新失败 —— 检查 oauth_context 是否完整");
         println!(
