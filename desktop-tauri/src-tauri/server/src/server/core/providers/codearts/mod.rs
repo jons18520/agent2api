@@ -158,8 +158,6 @@ impl ProviderAdapter for CodeArtsAdapter {
         telemetry: &'a std::sync::Arc<RequestTelemetry>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<ForwardOutcome, GatewayError>> + Send + 'a>> {
         Box::pin(async move {
-            // 本区域的两台网关地址（区域网关 + 可选福利网关），后面多处要用
-            let base_url = self.region.base_url();
             // ① 凭据（含临期主动续期与写回）；代理沿用编排层为本账号解析出的那份
             let credential = refresh::ensure_fresh(store, self.region, account_id, false, proxy.as_ref()).await?;
             if !credential.valid() {
@@ -177,6 +175,24 @@ impl ProviderAdapter for CodeArtsAdapter {
             };
             let benefit = model.source.needs_benefit_header();
             let upstream_model = model.id.clone();
+
+            // 出站基址：**福利模型打中国区域网关**（福利模型注册在中国的 InferHub，
+            // 国际版直接打本区域会 `InferHub.002002009.404`），其余模型打本区域网关。
+            // 会话闸、会话心跳、出站地址三处都跟着这一个值走，必须是同一个 ——
+            // 换了网关就是另一套上游会话，混用会让会话 id 与网关对不上。
+            let base_url = if benefit {
+                self.region.benefit_chat_base()
+            } else {
+                self.region.base_url()
+            };
+            // 福利模型换了网关就说一句：不然排障时只看到 `provider=codearts-intl`，
+            // 看不出请求其实打去了中国的区域网关。
+            if benefit && base_url != self.region.base_url() {
+                logging::log(
+                    "[CodeArts]",
+                    &format!("福利模型 {upstream_model} 改打中国区域网关 {base_url}（该模型注册在 cn-north-4 的 InferHub）"),
+                );
+            }
 
             // ②.5 尺寸门：这一家刚在「体 ≥ N 字节」上被上游拒过（TTL 内），同尺寸的
             // 就别再发出去 —— 上游那道墙按字节判，重发同一份体结论不变（实测见
@@ -735,8 +751,9 @@ impl ProviderAdapter for CodeArtsAdapter {
                 Ok(credential) => credential,
                 Err(error) => return super::adapter::ModelRefreshOutcome::failed(error.message),
             };
-            // 区域端点：福利网关两地共用同一台（见 `region` 的模块头）；是否启用
-            // 由区域上的 `/v1/benefit-gateway-config` 决定，`discover` 自己去查
+            // 区域端点：福利**目录**两地共用同一台 opengw（是否启用由区域上的
+            // `/v1/benefit-gateway-config` 决定，`discover` 自己去查）；但国际版的
+            // 福利**模型**要另打中国网关，路由在 `region::benefit_chat_base`（见模块头）。
             let base_url = self.region.base_url();
             let benefit_gateway_url = self.region.benefit_gateway_url();
             let endpoints = models::CatalogEndpoints {

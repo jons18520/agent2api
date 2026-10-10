@@ -243,11 +243,10 @@ pub fn parse_agent_ids(body: &str) -> Result<Vec<String>, String> {
 ///
 /// ── 只有显式 `enabled:false` 才算关闭（国际版形状不同，2026-10 实测）──
 /// 国内版回 `{"enabled":true,...}`；**国际版同一路径回的是 `{"vendors":[...]}`**
-/// —— 第三方模型目录（MaaS Global/CN、DeepSeek、OpenAI、Gemini、智谱、MiniMax 的
-/// `base_url` + `api_key_url` + 模型表），顶层根本没有 `enabled`。官方扩展判断福利
-/// 是否可用用的是 `if (config)`（拿到非空配置即视为启用），所以这里缺 `enabled`
-/// 字段时按**启用**处理：真取不到福利目录会在下一步（`/api/v1/gateway/config`）
-/// 如实报错，不会静默成"这个区域没福利"。
+/// —— 第三方模型目录（MaaS / DeepSeek / OpenAI / Gemini / 智谱 / MiniMax 的
+/// `base_url` + `api_key_url` + 模型表），顶层没有 `enabled`。官方扩展的判据是
+/// `if (config)`（拿到非空配置即视为启用），所以缺 `enabled` 时按启用处理：
+/// 真取不到福利目录会在下一步 `/api/v1/gateway/config` 如实报错，不会静默。
 pub fn parse_benefit_gate(body: &str) -> Result<bool, String> {
     let payload: Value =
         serde_json::from_str(body).map_err(|error| format!("福利开关不是合法 JSON：{error}"))?;
