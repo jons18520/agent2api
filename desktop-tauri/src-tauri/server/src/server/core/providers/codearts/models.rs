@@ -339,8 +339,10 @@ pub struct CatalogEndpoints<'a> {
 pub async fn discover(endpoints: &CatalogEndpoints<'_>, credential: &Credential) -> Catalog {
     let mut catalog = Catalog::default();
     let mut agent_models = Vec::new();
+    let mut agent_listed = 0usize;
     match fetch_agent_ids(endpoints, credential).await {
         Ok(ids) => {
+            agent_listed = ids.len();
             for id in ids {
                 match fetch_signed(
                     &format!("{}/v1/agent-center/agents/detail?agent_id={}", trim(endpoints.base_url), form_escape(&id)),
@@ -352,10 +354,13 @@ pub async fn discover(endpoints: &CatalogEndpoints<'_>, credential: &Credential)
                 )
                 .await
                 {
-                    Ok(body) => match parse_agent_detail(&body, endpoints.language) {
-                        Ok(models) => append_unique(&mut agent_models, models),
-                        Err(reason) => catalog.warnings.push(format!("agent 目录 {id}：{reason}")),
-                    },
+                    Ok(body) => {
+                        log_raw(&format!("agent detail {id}"), &body);
+                        match parse_agent_detail(&body, endpoints.language) {
+                            Ok(models) => append_unique(&mut agent_models, models),
+                            Err(reason) => catalog.warnings.push(format!("agent 目录 {id}：{reason}")),
+                        }
+                    }
                     Err(reason) => catalog.warnings.push(format!("agent 目录 {id}：{reason}")),
                 }
             }
@@ -372,32 +377,111 @@ pub async fn discover(endpoints: &CatalogEndpoints<'_>, credential: &Credential)
     )
     .await
     {
-        Ok(body) => match parse_builtin(&body) {
-            Ok(models) => models,
-            Err(reason) => {
-                catalog.warnings.push(format!("builtin 目录：{reason}"));
-                Vec::new()
+        Ok(body) => {
+            log_raw("builtin", &body);
+            match parse_builtin(&body) {
+                Ok(models) => models,
+                Err(reason) => {
+                    catalog.warnings.push(format!("builtin 目录：{reason}"));
+                    Vec::new()
+                }
             }
-        },
+        }
         Err(reason) => {
             catalog.warnings.push(format!("builtin 目录：{reason}"));
             Vec::new()
         }
     };
-    let mut models = merge_agent_and_builtin(agent_models, builtin);
 
+    // 福利源：先看区域上的开关（`fetch_benefit` 内部查 `/v1/benefit-gateway-config`）。
+    // `None` = 本区域没配福利网关；`Ok(None)` = 配了但开关没开。两者分开记，
+    // 面板上「国际版只有两个模型」时才能一眼看出是「没接福利」还是「接了没启用」。
+    let mut benefit_models: Option<Vec<ModelConfig>> = None;
+    let mut benefit_state = if endpoints.benefit_gateway_url.filter(|url| !url.trim().is_empty()).is_some() {
+        "未启用（区域开关关闭）"
+    } else {
+        "跳过（本区域未配置福利网关）"
+    };
     if let Some(gateway) = endpoints.benefit_gateway_url.filter(|url| !url.trim().is_empty()) {
         match fetch_benefit(endpoints, credential, gateway).await {
-            Ok(Some(benefit)) => models = merge_benefit(models, benefit),
+            Ok(Some(benefit)) => {
+                benefit_state = "已启用";
+                benefit_models = Some(benefit);
+            }
             Ok(None) => {}
             Err(reason) => catalog.warnings.push(format!("福利目录：{reason}")),
         }
+    }
+
+    // 三个源各自的 id 要在**合并前**取，否则「谁贡献了什么」就被去重抹平了。
+    let agent_ids = ids_of(&agent_models);
+    let builtin_ids = ids_of(&builtin);
+    let benefit_ids = benefit_models.as_ref().map(|models| ids_of(models)).unwrap_or_default();
+
+    let mut models = merge_agent_and_builtin(agent_models, builtin);
+    if let Some(benefit) = benefit_models {
+        models = merge_benefit(models, benefit);
     }
     if models.is_empty() {
         catalog.warnings.push("该账号没有返回任何可用模型".to_string());
     }
     catalog.models = models;
+    log_catalog(endpoints, agent_listed, &agent_ids, &builtin_ids, benefit_state, &benefit_ids, &catalog);
     catalog
+}
+
+/// 目录结果落日志。
+///
+/// 「账号能用但面板上只列出一两个模型」这类问题，光看最终清单分不清是**哪个源空了**
+/// 还是**上游本来就这么少**：`agent` 要求 `display_enabled=true`、`builtin` 只看
+/// `enable`、`福利` 还要过区域开关，三条过滤链任意一条把模型筛掉，结果都一样。
+/// 所以这里把**每个源的 id 原文**与**合并后的 id** 都打出来，逐源对账。
+///
+/// 汇总用 `logging::log`（始终入库，面板可见）；原始响应体用
+/// `logging::verbose`（控制台始终输出，开调试后才入库）—— 后者可能很长，
+/// 只在排障时要。
+fn log_catalog(
+    endpoints: &CatalogEndpoints<'_>,
+    agent_listed: usize,
+    agent_ids: &str,
+    builtin_ids: &str,
+    benefit_state: &str,
+    benefit_ids: &str,
+    catalog: &Catalog,
+) {
+    let base = trim(endpoints.base_url);
+    crate::server::logging::log("[CodeArts]", &format!("模型目录刷新 base={base}：agent 列表返回 {agent_listed} 个 agent"));
+    crate::server::logging::log("[CodeArts]", &format!("  源 agent（display_enabled=true）：{}", show_list(agent_ids)));
+    crate::server::logging::log("[CodeArts]", &format!("  源 builtin（enable!=false）：{}", show_list(builtin_ids)));
+    crate::server::logging::log("[CodeArts]", &format!("  源 福利（{benefit_state}）：{}", show_list(benefit_ids)));
+    crate::server::logging::log("[CodeArts]", &format!("  合并后 {} 个：{}", catalog.models.len(), show_list(&ids_of(&catalog.models))));
+    if !catalog.warnings.is_empty() {
+        crate::server::logging::log("[CodeArts]", &format!("  告警：{}", catalog.warnings.join("；")));
+    }
+}
+
+/// 逗号连接；空串显式写成「（无）」—— 空白在日志里分不清「没有」和「没打出来」。
+fn show_list(ids: &str) -> String {
+    if ids.trim().is_empty() {
+        "（无）".to_string()
+    } else {
+        ids.to_string()
+    }
+}
+
+/// 源目录的 id 列表（合并前逐源取，用于日志对账）。
+fn ids_of(models: &[ModelConfig]) -> String {
+    models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>().join(", ")
+}
+
+/// 把上游原始响应体打到 verbose（排障用）。超长的只记长度，别把日志撑爆。
+fn log_raw(label: &str, body: &str) {
+    const MAX: usize = 4000;
+    if body.len() <= MAX {
+        crate::server::logging::verbose("[CodeArts]", &format!("{label} 原文：{body}"));
+    } else {
+        crate::server::logging::verbose("[CodeArts]", &format!("{label} 原文 {MAX} 字节以上（共 {} 字节），已省略", body.len()));
+    }
 }
 
 /// agent id 列表（分页，照参考实现的 100/页、最多 100 页）。
