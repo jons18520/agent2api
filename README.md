@@ -211,7 +211,7 @@ agent2api/
 │  │  │  │  │  │                protocol（OpenAI ↔ ADK 的 Gemini 风格信封）/
 │  │  │  │  │  │                chat（会话式转发）/ stream（ADK SSE 解包）/ balance
 │  │  │  │  │  ├─ codearts/     CodeArts（华为云码道；国内版 / 国际版按 region 参数化）：
-│  │  │  │  │  │                region（区域端点：cn-north-4 / ap-southeast-3）/
+│  │  │  │  │  │                region（区域端点：cn-north-4 / ap-southeast-1）/
 │  │  │  │  │  │                signer（华为云 SDK-HMAC-SHA256，
 │  │  │  │  │  │                与参考实现逐字节对账）/ credentials / dpop（ES256 DPoP proof）/
 │  │  │  │  │  │                oauth（PKCE 网页登录 + loopback 回调）/ refresh（单飞续期）/

@@ -37,7 +37,7 @@ use super::region::Region;
 /// 与官方扩展一致的固定 client_id。
 pub const CLIENT_ID: &str = "vscode-codebot";
 /// 令牌端点与身份端点（**国内版默认值**；真正的取值按区域走
-/// [`Region::token_url`] / [`Region::identity_url`]，国际版是 `sts.ap-southeast-3`）。
+/// [`Region::token_url`] / [`Region::identity_url`]，国际版是 `sts.ap-southeast-1`）。
 /// 这两个常量保留是为了兼容既有引用（`--ignored` 的上游阶梯测试在用），
 /// 新代码请按区域取。
 pub const TOKEN_URL: &str = "https://sts.cn-north-4.myhuaweicloud.com/v1/oauth2/tokens";
@@ -53,7 +53,7 @@ const REQUEST_TIMEOUT_MS: u64 = 30_000;
 // 参数顺序与取值逐字照抄参考实现，`authorize_url` 的测试拿它生成的金向量钉住。
 
 /// 授权页所在站点（与 API 的 `snap-access` 不是一台；**国内版默认值**，
-/// 国际版是 `devcloud.ap-southeast-3.huaweicloud.com`，见 [`Region::web_login_base`]）。
+/// 国际版是 `codearts.ap-southeast-1.huaweicloud.com`，见 [`Region::web_login_base`]）。
 pub const WEB_LOGIN_BASE: &str = "https://codearts.huaweicloud.com";
 /// portal 固定回到的路径（我们不能改，改了就 404 在它自己的站上）。
 pub const CALLBACK_PATH: &str = "/oauth/callback";
@@ -136,7 +136,7 @@ async fn token_request(
     previous_refresh_token: &str,
     proxy: Option<&ResolvedProxy>,
 ) -> Result<Credential, GatewayError> {
-    // 令牌端点按区域取（国际版是 `sts.ap-southeast-3`，见 `region` 的模块头）
+    // 令牌端点按区域取（国际版是 `sts.ap-southeast-1`，见 `region` 的模块头）
     let token_url = region.token_url();
     let key = DpopKey::from_key_pair(&context.dpop_key_pair)
         .map_err(|reason| GatewayError::with_status(400, reason))?;

@@ -358,7 +358,7 @@ function zcodeForm(spec: { provider: string; label: string; site: string; planNo
 
 /**
  * CodeArts（华为云 AI 代码助手 / snap-access）两个区域（国内版 / 国际版）：
- * 同一套协议、**不同区域网关**（国内 `cn-north-4` / 国际 `ap-southeast-3`，
+ * 同一套协议、**不同区域网关**（国内 `cn-north-4` / 国际 `ap-southeast-1`，
  * 见后端 `providers::codearts::region` 的模块头），因此输出两份配置。
  *
  * ── 网页登录（OAuth 授权码 + PKCE）────────────────────────

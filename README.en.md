@@ -201,7 +201,7 @@ agent2api/
 │  │  │  │  │  │                protocol (OpenAI <-> ADK Gemini-style envelope) /
 │  │  │  │  │  │                chat (session-style forwarding) / stream (ADK SSE unwrapping) / balance
 │  │  │  │  │  ├─ codearts/     CodeArts (Huawei Cloud; domestic / international, region-parameterized):
-│  │  │  │  │  │                region (regional endpoints: cn-north-4 / ap-southeast-3) /
+│  │  │  │  │  │                region (regional endpoints: cn-north-4 / ap-southeast-1) /
 │  │  │  │  │  │                signer (Huawei Cloud SDK-HMAC-SHA256,
 │  │  │  │  │  │                byte-for-byte vectors from the reference implementation) /
 │  │  │  │  │  │                credentials / dpop (ES256 DPoP proof) /

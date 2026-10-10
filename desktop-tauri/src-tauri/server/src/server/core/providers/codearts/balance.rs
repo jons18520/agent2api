@@ -373,7 +373,7 @@ pub fn parse_benefit_balance(body: &str, credential: &Credential) -> Result<Opti
 /// 读到 0 —— 三种状态在 `query_usage` 里分别落成 wallets / benefitAbsent / benefitError。
 ///
 /// ── 空 `gateway` 也是 `Ok(None)`（国际版没有福利网关）──────────
-/// 国际版（`ap-southeast-3`）没有运营活动后端，区域定义给的
+/// 国际版（`ap-southeast-1`）没有运营活动后端，区域定义给的
 /// `benefit_gateway_url` 是 `None`，调用方按约定传空串。**不能**拿空串去拼 URL
 /// 再发请求：那会得到一个相对地址（无 host），传输层报错后落进 `benefitError`，
 /// 界面上把一个「本区域就没有这项」显示成一条红色错误。所以这里显式短路成

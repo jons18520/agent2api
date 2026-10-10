@@ -300,9 +300,9 @@ pub enum ProviderKind {
     /// 两地共用同一份实现（`codearts::CodeArtsAdapter` 持有一个
     /// `codearts::region::Region`），差别只在**区域端点**：国内 `cn-north-4`
     /// （`snap-access.cn-north-4.myhuaweicloud.com` / `sts.cn-north-4...` /
-    /// 门户 `codearts.huaweicloud.com`），国际 `ap-southeast-3`
-    /// （`snap-access.ap-southeast-3...` / `sts.ap-southeast-3...` /
-    /// 门户 `devcloud.ap-southeast-3.huaweicloud.com`）。
+    /// 门户 `codearts.huaweicloud.com`），国际 `ap-southeast-1`
+    /// （`snap-access.ap-southeast-1...` / `sts.ap-southeast-1...` /
+    /// 门户 `codearts.ap-southeast-1.huaweicloud.com`）。
     ///
     /// ── provider id 为什么只有国际版是新 id ──────────────────────
     /// 国内版保持 `"codearts"` 不动：它是存量账号的落盘契约（改名会让账号
@@ -312,7 +312,7 @@ pub enum ProviderKind {
     /// 这类字面量。
     CodeArts,
     /// CodeArts **国际版**（`codearts-intl`）。与 [`ProviderKind::CodeArts`]
-    /// 同一套协议、不同区域（国际站仅在 **AP-Singapore / `ap-southeast-3`**
+    /// 同一套协议、不同区域（国际站仅在 **AP-Singapore / `ap-southeast-1`**
     /// 提供，见 `codearts::region` 的模块头）。
     ///
     /// ── 为什么两个区域是两家 provider（与 AutoClaw / Accio / ZCode 同一思路）──

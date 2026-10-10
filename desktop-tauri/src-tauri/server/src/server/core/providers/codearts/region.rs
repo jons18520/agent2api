@@ -12,19 +12,18 @@
 //! ```text
 //!              区域网关（snap-access）                          STS（sts）                          网页登录门户
 //!   国内版  https://snap-access.cn-north-4.myhuaweicloud.com   https://sts.cn-north-4.myhuaweicloud.com   https://codearts.huaweicloud.com
-//!   国际版  https://snap-access.ap-southeast-3.myhuaweicloud.com  https://sts.ap-southeast-3.myhuaweicloud.com  https://devcloud.ap-southeast-3.huaweicloud.com
+//!   国际版  https://snap-access.ap-southeast-1.myhuaweicloud.com  https://sts.ap-southeast-1.myhuaweicloud.com  https://codearts.ap-southeast-1.huaweicloud.com
 //! ```
 //!
-//! ── 国际版为什么是 `ap-southeast-3`（依据）────────────────────
+//! ── 国际版为什么是 `ap-southeast-1`（依据）────────────────────
 //! 华为云国际站的产品页与价格文档写明 CodeArts **仅在 AP-Singapore 区域提供**
 //! （原文 "Only available in the AP-Singapore region"，见
-//! `support.huaweicloud.com/intl/en-us/price-devcloud/codearts_29_0006.html`），
-//! 而 AP-Singapore 的区域码就是 `ap-southeast-3`（国际站控制台链接里的
-//! `region=ap-southeast-3` 与之一致）。实测（2026-10）该区域上
-//! `snap-access.ap-southeast-3.myhuaweicloud.com/v1/model/builtin` 与
-//! `sts.ap-southeast-3.myhuaweicloud.com/v1/oauth2/tokens` 的响应与国内
-//! `cn-north-4` **逐字同形**（前者回 `APIG.0301` 未鉴权、后者回
-//! `APIGW.0106` 缺 DPoP），说明两地是同一套网关协议的不同部署。
+//! `support.huaweicloud.com/intl/en-us/price-devcloud/codearts_29_0006.html`）。
+//! 实测（2026-10）该区域上 `snap-access.ap-southeast-1.myhuaweicloud.com/v1/model/builtin`
+//! 回 `APIG.0301` 未鉴权、`sts.ap-southeast-1.myhuaweicloud.com/v1/oauth2/tokens`
+//! 回 `APIGW.0106` 缺 DPoP，与国内 `cn-north-4` 逐字同形。
+//! 注意：区域码是 `ap-southeast-1`（不是 `ap-southeast-3`），后者 snap-access 无响应、
+//! STS 返回 `STS5.1007 this API is not supported in this region`。
 //!
 //! ── 福利网关国际版没有 ──────────────────────────────────────
 //! 国内版的「福利网关」（`opengw.developer.huaweicloud.com`）是**中国站**
@@ -54,7 +53,7 @@ pub enum Region {
     /// 国内版（`cn-north-4`；provider id 是 `codearts`）
     #[default]
     Cn,
-    /// 国际版（`ap-southeast-3`，AP-Singapore；provider id 是 `codearts-intl`）
+    /// 国际版（`ap-southeast-1`，AP-Singapore；provider id 是 `codearts-intl`）
     Intl,
 }
 
@@ -110,7 +109,7 @@ impl Region {
     pub const fn default_base_url(self) -> &'static str {
         match self {
             Self::Cn => "https://snap-access.cn-north-4.myhuaweicloud.com",
-            Self::Intl => "https://snap-access.ap-southeast-3.myhuaweicloud.com",
+            Self::Intl => "https://snap-access.ap-southeast-1.myhuaweicloud.com",
         }
     }
 
@@ -118,7 +117,7 @@ impl Region {
     pub const fn default_sts_base(self) -> &'static str {
         match self {
             Self::Cn => "https://sts.cn-north-4.myhuaweicloud.com",
-            Self::Intl => "https://sts.ap-southeast-3.myhuaweicloud.com",
+            Self::Intl => "https://sts.ap-southeast-1.myhuaweicloud.com",
         }
     }
 
@@ -255,10 +254,10 @@ mod tests {
         assert_ne!(cn.default_base_url(), intl.default_base_url());
         assert_ne!(cn.default_sts_base(), intl.default_sts_base());
         assert_ne!(cn.default_web_login_base(), intl.default_web_login_base());
-        // 国际版落在 AP-Singapore（`ap-southeast-3`），国内版落在 cn-north-4
+        // 国际版落在 AP-Singapore（`ap-southeast-1`），国内版落在 cn-north-4
         assert!(cn.default_base_url().contains("cn-north-4"));
-        assert!(intl.default_base_url().contains("ap-southeast-3"));
-        assert!(intl.default_sts_base().contains("ap-southeast-3"));
+        assert!(intl.default_base_url().contains("ap-southeast-1"));
+        assert!(intl.default_sts_base().contains("ap-southeast-1"));
         // 令牌 / 身份端点挂在各自的 STS 基址下
         assert!(cn.token_url().starts_with(cn.default_sts_base()));
         assert!(intl.identity_url().starts_with(intl.default_sts_base()));

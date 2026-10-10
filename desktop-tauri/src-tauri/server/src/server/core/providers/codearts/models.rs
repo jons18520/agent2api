@@ -590,7 +590,7 @@ fn form_escape(value: &str) -> String {
 /// 上层据此报"账号没有可用模型"。**绝不**塞静态兜底：那会广告出一批
 /// "列出来但一调就 400"的幽灵模型（§3.4 的坑，CPA 侧删掉静态列表才治好）。
 /// ── 为什么每个区域各占一格缓存 ──────────────────────────────
-/// 两个区域打的是两台网关、两份清单（国内 `cn-north-4` / 国际 `ap-southeast-3`，
+/// 两个区域打的是两台网关、两份清单（国内 `cn-north-4` / 国际 `ap-southeast-1`，
 /// 见 `region` 的模块头）。共用一格会让后刷的区域把先刷的覆盖掉 —— 与 WorkBuddy
 /// 拆家前「单槽缓存互相覆盖」（issue #74）是同一个坑。因此按区域分格。
 static CACHED_CN: std::sync::OnceLock<std::sync::Mutex<Option<CachedCatalog>>> = std::sync::OnceLock::new();
