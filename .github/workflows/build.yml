@@ -51,7 +51,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*'
+      - 'build*'
 
 env:
   RUST_BACKTRACE: 1
