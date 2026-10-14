@@ -104,9 +104,6 @@ pub fn settled_view(store: &AccountStore, account_id: &str, provider: &str) -> O
         CODEARTS_PROVIDER_ID | CODEARTS_INTL_PROVIDER_ID => {
             codearts_onboarding::settled_view(store.codearts_account_record_any(account_id).as_ref())
         }
-        OFFICEACE_PROVIDER_ID => {
-            officeace_onboarding::settled_view(store.officeace_account_record(account_id).as_ref())
-        }
         _ => loomy_onboarding::settled_view(store.loomy_account_record(account_id).as_ref()),
     }
 }
@@ -122,9 +119,6 @@ pub async fn status(state: &ServerState, account_id: &str, refresh: bool) -> Res
         }
         CODEARTS_PROVIDER_ID | CODEARTS_INTL_PROVIDER_ID => {
             codearts_onboarding::get_tasks(state.store(), account_id, refresh).await
-        }
-        OFFICEACE_PROVIDER_ID => {
-            officeace_onboarding::get_tasks(state.store(), account_id, refresh).await
         }
         _ => loomy_onboarding::get_tasks(state.store(), account_id, refresh).await,
     };
